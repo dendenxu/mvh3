@@ -23,6 +23,7 @@ class TokenLayout:
     chunk: torch.Tensor
     scope: torch.Tensor
     cross_view: bool = True
+    active: torch.Tensor | None = None
 
     def __post_init__(self):
         if self.kind.ndim != 1 or self.kind.numel() == 0:
@@ -36,6 +37,12 @@ class TokenLayout:
             raise ValueError("Scope/chunk indices must be >= -1")
         if ((self.kind != CONDITION) & ((self.chunk < 0) | (self.scope < 0))).any():
             raise ValueError("Clean/noisy media need explicit nonnegative chunk and scope indices")
+        if self.active is not None and (self.active.shape != self.kind.shape or self.active.dtype != torch.bool or self.active.device != self.kind.device):
+            raise ValueError("active must be a boolean vector on the layout device")
+
+    def to(self, device):
+        return type(self)(self.kind.to(device), self.chunk.to(device), self.scope.to(device), self.cross_view,
+                          self.active.to(device) if self.active is not None else None)
 
     def mask_mod(self, batch, head, query, key):
         # Padded flex-attention blocks may evaluate indices beyond the real sequence.
@@ -55,7 +62,10 @@ class TokenLayout:
             scope = (qscope >= 0) | (kscope < 0)
         else:
             scope = (kscope < 0) | (qscope == kscope)
-        return valid & scope & (condition | clean | previous | current)
+        visible = scope & (condition | clean | previous | current)
+        if self.active is not None:
+            visible = (self.active[q] & self.active[k] & visible) | (~self.active[q] & (q == k))
+        return valid & visible
 
     def dense(self, indices: torch.Tensor | None = None, max_tokens: int = 4096) -> torch.Tensor:
         """Small-layout reference mask. Use block_mask for training-sized sequences."""
@@ -69,7 +79,10 @@ class TokenLayout:
         from torch.nn.attention.flex_attention import create_block_mask
 
         if indices is None:
-            mask_mod, size = self.mask_mod, self.kind.numel()
+            size = self.kind.numel()
+
+            def mask_mod(batch, head, query, key):
+                return self.mask_mod(batch, head, query, key)
         else:
             size = indices.numel()
 

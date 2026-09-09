@@ -17,6 +17,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from torch.nn.attention.flex_attention import BlockMask, flex_attention
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders import PeftAdapterMixin
@@ -29,9 +30,12 @@ from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.modeling_utils import ModelMixin, get_parameter_dtype
 
 from .camera import CameraEncoding, apply_camera, precompute_camera
+from .masking import TokenLayout
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+# Eager flex materializes quadratic scores. Fail if compilation cannot serve a shape.
+compiled_flex_attention = torch.compile(flex_attention, dynamic=False, fullgraph=True)
 
 
 # MiniMax-H3 tags every row of the packed sequence with the modality it belongs to and keeps one set of AdaLN
@@ -200,16 +204,16 @@ class MiniMaxH3AttnProcessor:
             query = apply_camera(query, camera, camera_indices)
             key = apply_camera(key, camera, camera_indices)
 
-        hidden_states = dispatch_attention_fn(
-            query,
-            key,
-            value,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=False,
-            backend=self._attention_backend,
-            parallel_config=self._parallel_config,
-        )
+        if isinstance(attention_mask, BlockMask):
+            hidden_states = compiled_flex_attention(
+                query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), block_mask=attention_mask,
+            ).transpose(1, 2)
+        else:
+            hidden_states = dispatch_attention_fn(
+                query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False,
+                backend=None if self._attention_backend == "flex" else self._attention_backend,
+                parallel_config=self._parallel_config,
+            )
         hidden_states = hidden_states.flatten(2, 3).type_as(query)
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
@@ -665,7 +669,13 @@ class MiniMaxH3Transformer3DModel(ModelMixin, ConfigMixin, AttentionMixin, PeftA
                 raise ValueError("Every video token needs an aligned camera pose")
             camera = precompute_camera(camera_pose)
 
-        if attention_mask is not None and text_attention_mask is None:
+        layout = attention_mask if isinstance(attention_mask, TokenLayout) else None
+        if layout is not None:
+            if layout.kind.numel() != sequence_length:
+                raise ValueError("Packed token layout differs from the model sequence")
+            if text_attention_mask is None:
+                text_attention_mask = layout.to(hidden_states.device).dense(text_indices)
+        elif attention_mask is not None and text_attention_mask is None:
             if not isinstance(attention_mask, torch.Tensor):
                 raise ValueError("A sparse packed mask requires an explicit text_attention_mask")
             if attention_mask.ndim not in (2, 4) or attention_mask.shape[-2:] != (sequence_length, sequence_length):
@@ -695,20 +705,36 @@ class MiniMaxH3Transformer3DModel(ModelMixin, ConfigMixin, AttentionMixin, PeftA
         # 3. Row -> AdaLN table row.
         adaln_indices = timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags
 
+        local_inputs = {}
         for block in self.transformer_blocks:
+            block_device = next(block.parameters()).device
+            if block_device not in local_inputs:
+                mask = layout.to(block_device).block_mask() if layout is not None else attention_mask
+                if mask is not None and layout is None:
+                    mask = mask.to(block_device)
+                local_inputs[block_device] = (
+                    temb.to(block_device), adaln_indices.to(block_device),
+                    tuple(value.to(block_device) for value in rotary_emb), mask,
+                    camera.to(block_device) if camera is not None else None,
+                    camera_indices.to(block_device) if camera_indices is not None else None,
+                )
+            hidden_states = hidden_states.to(block_device)
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states = self._gradient_checkpointing_func(
-                    block, hidden_states, temb, adaln_indices, rotary_emb, attention_mask, camera, camera_indices
+                    block, hidden_states, *local_inputs[block_device]
                 )
             else:
-                hidden_states = block(hidden_states, temb, adaln_indices, rotary_emb, attention_mask, camera, camera_indices)
+                hidden_states = block(hidden_states, *local_inputs[block_device])
 
         # 5. Both heads run over every row, then the rows of each modality are selected. The heads are listed in
         # `_keep_in_fp32_modules`, so they stay float32 while the block stack runs in the requested `torch_dtype`;
         # align the activation with their parameter dtype.
-        hidden_states = self.norm_out(hidden_states, temb, timestep_indices).to(get_parameter_dtype(self.proj_out))
-        video_output = self.proj_out(hidden_states).index_select(1, video_indices)
-        audio_output = self.audio_proj_out(hidden_states).index_select(1, audio_indices)
+        output_device = next(self.norm_out.parameters()).device
+        hidden_states = self.norm_out(
+            hidden_states.to(output_device), temb.to(output_device), timestep_indices.to(output_device)
+        ).to(get_parameter_dtype(self.proj_out))
+        video_output = self.proj_out(hidden_states).index_select(1, video_indices.to(output_device))
+        audio_output = self.audio_proj_out(hidden_states).index_select(1, audio_indices.to(output_device))
 
         if not return_dict:
             return (video_output, audio_output)

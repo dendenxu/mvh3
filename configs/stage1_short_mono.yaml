@@ -6,12 +6,15 @@ model:
   added_trainable_parameters: 0
   trainable_scope: main_attention
   gradient_checkpointing: true
+  flow_velocity: data_minus_noise
+  clean_timestep: 1.0
 optimizer:
   lr: 1.0e-6  # Proposed initial H3 LR; not a validated optimum.
   weight_decay: 0.01
   betas: [0.9, 0.999]
   grad_clip: 10.0
   gradient_accumulation_steps: 1
+  fp32_master_weights: true
 data:
   reference: worldviews_dataset.json
   source_count: 19
@@ -26,6 +29,8 @@ data:
   include_all_source_views: true
   retain_partial_tail: true
   latent_cache_namespace: minimax_h3_fl2va
+  temporal_mapping: h3_17n5_padded
+  exclude_latent_padding_from_loss: true
   text_encoder: qwen3_vl_32b_layer50
   text_cache_namespace: minimax_h3_qwen3vl32b_layer50
 attention:

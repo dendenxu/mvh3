@@ -17,6 +17,15 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+verification = [
+    "torch>=2.7",
+    "transformers>=5.9.0",
+    "accelerate>=1.2.1",
+    "numpy>=1.26",
+    "scipy>=1.10",
+    "pyarrow>=17",
+    "opencv-python-headless>=4.10",
+]
 
 [tool.setuptools.packages.find]
 include = ["mvh3*"]

@@ -5,7 +5,7 @@ WorldGen's pure-temporal encoding. H3 uses split-half RoPE, so its H/W pairs
 must be gathered and interleaved before applying that allocation.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import json
 import math
 from pathlib import Path
@@ -29,6 +29,9 @@ class CameraEncoding:
     h_sin: torch.Tensor
     w_cos: torch.Tensor
     w_sin: torch.Tensor
+
+    def to(self, device, non_blocking=False):
+        return type(self)(*(getattr(self, field.name).to(device, non_blocking=non_blocking) for field in fields(self)))
 
 
 def rotvec_to_matrix(rotvec: torch.Tensor) -> torch.Tensor:
