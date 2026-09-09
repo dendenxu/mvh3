@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Full 33B original-weight training verification on real H3-encoded samples.
+"""Historical all-attention probe on real H3-encoded samples.
 
-Uses one process with intact layers on multiple local GPUs, not cluster jobs.
+Uses one process with intact layers on multiple local GPUs. Its all-attention
+1e-6 recipe is retained only to reproduce old probe artifacts. Use
+verify_worldviews_runtime.py for the current WorldViews recipe and SP/FSDP.
 """
 
 import runtime_env
@@ -18,11 +20,11 @@ import time
 import torch
 import torch._dynamo.config
 
-from mvh3.checkpoint import load_original_transformer
-from mvh3.execution import place_transformer
-from mvh3.optim import MasterAdamW
-from mvh3.packing import teacher_forcing_batch
-from mvh3.training import attention_parameters, flow_matching_loss, parameter_signature
+from h3.checkpoint import load_original_transformer
+from h3.utils.execution import place_transformer
+from h3.utils.optim import MasterAdamW
+from h3.packing import teacher_forcing_batch
+from h3.utils.training import attention_parameters, flow_matching_loss, parameter_signature
 
 
 def log(message):
@@ -77,9 +79,11 @@ def restore_checkpoint(path, model, optimizer, read_workers=8):
     if set(loaded["model"]) != set(optimizer.names):
         raise ValueError("Stage checkpoint has a different trainable parameter set")
     optimizer.load_state_dict(loaded["optimizer"])
-    for name, parameter, master, saved_master in zip(
-        optimizer.names, optimizer.parameters, optimizer.masters, loaded["optimizer"]["masters"], strict=True
-    ):
+    for name, parameter, master, saved_master in zip(optimizer.names,
+                                                     optimizer.parameters,
+                                                     optimizer.masters,
+                                                     loaded["optimizer"]["masters"],
+                                                     strict=True):
         if not torch.equal(parameter, loaded["model"][name].to(parameter.device)):
             raise AssertionError(f"Saved model/master disagree: {name}")
         if not torch.equal(master, saved_master.to(master.device)):
@@ -91,7 +95,8 @@ def restore_checkpoint(path, model, optimizer, read_workers=8):
     for index, saved_state in saved_adamw["state"].items():
         for key, saved in saved_state.items():
             actual = current_adamw["state"][index][key]
-            equal = torch.equal(actual, saved.to(actual.device)) if isinstance(saved, torch.Tensor) else actual == saved
+            equal = torch.equal(actual, saved.to(actual.device)) if isinstance(saved,
+                                                                               torch.Tensor) else actual == saved
             if not equal:
                 raise AssertionError(f"Optimizer state restore mismatch: {index}/{key}")
     global_step = loaded["global_step"]
@@ -99,8 +104,8 @@ def restore_checkpoint(path, model, optimizer, read_workers=8):
     if not steps and path.with_name("progress.json").is_file():
         steps = json.loads(path.with_name("progress.json").read_text())
         steps = [step for step in steps if step["global_step"] <= global_step]
-    if steps and (steps[-1]["global_step"] != global_step or
-                  steps[-1]["master_digest_after"] != sample_digest(zip(optimizer.names, optimizer.masters))):
+    if steps and (steps[-1]["global_step"] != global_step
+                  or steps[-1]["master_digest_after"] != sample_digest(zip(optimizer.names, optimizer.masters))):
         raise AssertionError("Checkpoint and recorded stage progress disagree")
     del loaded, saved_adamw, current_adamw
     gc.collect()
@@ -110,6 +115,8 @@ def restore_checkpoint(path, model, optimizer, read_workers=8):
 @torch.no_grad()
 def verify_native_blocks(model):
     """Compare loaded first/middle/last blocks with pinned upstream computation."""
+    import sys
+    sys.path.insert(0, str(runtime_env.ROOT.parent / "diffusers/src"))
     from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3TransformerBlock
 
     results = []
@@ -118,8 +125,13 @@ def verify_native_blocks(model):
         config = model.config
         with torch.device("meta"):
             upstream = MiniMaxH3TransformerBlock(
-                config.hidden_size, config.num_attention_heads, config.attention_head_dim,
-                config.ffn_dim, config.time_embed_dim, config.norm_eps, config.qk_norm_eps,
+                config.hidden_size,
+                config.num_attention_heads,
+                config.attention_head_dim,
+                config.ffn_dim,
+                config.time_embed_dim,
+                config.norm_eps,
+                config.qk_norm_eps,
             )
         upstream.load_state_dict(block.state_dict(), strict=True, assign=True)
         device, dtype = block.attn.to_q.weight.device, block.attn.to_q.weight.dtype
@@ -145,8 +157,15 @@ def main():
     parser.add_argument("--short-steps", type=int, default=2)
     parser.add_argument("--long-steps", type=int, default=1)
     parser.add_argument("--resume", type=Path, help="Resume stage 2 in a fresh process from stage1_resume.pt")
-    parser.add_argument("--extra-features", type=Path, action="append", default=[], help="Additional real stage-2 shape feature files, one update each")
-    parser.add_argument("--checkpoint-read-workers", type=int, default=8, help="Bounded shared-storage readers; 0 disables read-ahead")
+    parser.add_argument("--extra-features",
+                        type=Path,
+                        action="append",
+                        default=[],
+                        help="Additional real stage-2 shape feature files, one update each")
+    parser.add_argument("--checkpoint-read-workers",
+                        type=int,
+                        default=8,
+                        help="Bounded shared-storage readers; 0 disables read-ahead")
     args = parser.parse_args()
     if args.short_steps < 1 or args.long_steps < 1:
         parser.error("Both stages need at least one optimizer update")
@@ -180,13 +199,15 @@ def main():
         log("Restoring stage 1 into the freshly loaded original model and new optimizer")
         global_step, stages = restore_checkpoint(args.resume, model, optimizer, args.checkpoint_read_workers)
         log(f"Every trainable weight, FP32 master, AdamW moment and step restored; global step={global_step}")
-    schedule = [("long_multiview", args.long_steps)] if args.resume else [("short_mono", args.short_steps), ("long_multiview", args.long_steps)]
+    schedule = [("long_multiview", args.long_steps)] if args.resume else [("short_mono", args.short_steps),
+                                                                          ("long_multiview", args.long_steps)]
     schedule = [(stage, steps, args.features / f"{stage}.pt") for stage, steps in schedule]
     schedule.extend((path.parent.name, 1, path) for path in args.extra_features)
     for stage, steps, feature_path in schedule:
         features = torch.load(feature_path, map_location="cpu", weights_only=True)
         inputs, target, mask = teacher_forcing_batch(features, devices[0], cross_view=stage != "short_mono")
-        log(f"{stage}: real latent shape={list(features['latents'].shape)}, packed tokens={len(inputs['token_tags'])}, loss tokens={mask.sum().item()}")
+        log(f"{stage}: real latent shape={list(features['latents'].shape)}, packed tokens={len(inputs['token_tags'])}, loss tokens={mask.sum().item()}"
+            )
         for local_step in range(steps):
             started = time.monotonic()
             optimizer.zero_grad()
@@ -207,12 +228,22 @@ def main():
             if model_before == model_after:
                 raise AssertionError("Updates did not reach the original model weights")
             global_step += 1
-            result = {"stage": stage, "global_step": global_step, "loss": loss.item(), "gradient_norm": norm,
-                      "seconds": time.monotonic() - started, "master_digest_before": before, "master_digest_after": after,
-                      "model_digest_before": model_before, "model_digest_after": model_after,
-                      "latent_shape": list(features["latents"].shape), "source_frames": features["source_frames"],
-                      "packed_tokens": len(inputs["token_tags"]), "loss_tokens": int(mask.sum()),
-                      "gpu_peak_gib": [torch.cuda.max_memory_allocated(device) / 1024**3 for device in devices]}
+            result = {
+                "stage": stage,
+                "global_step": global_step,
+                "loss": loss.item(),
+                "gradient_norm": norm,
+                "seconds": time.monotonic() - started,
+                "master_digest_before": before,
+                "master_digest_after": after,
+                "model_digest_before": model_before,
+                "model_digest_after": model_after,
+                "latent_shape": list(features["latents"].shape),
+                "source_frames": features["source_frames"],
+                "packed_tokens": len(inputs["token_tags"]),
+                "loss_tokens": int(mask.sum()),
+                "gpu_peak_gib": [torch.cuda.max_memory_allocated(device) / 1024**3 for device in devices]
+            }
             stages.append(result)
             (args.output / "progress.json").write_text(json.dumps(stages, indent=2) + "\n")
             log(f"{stage} optimizer step {global_step}: grad_norm={norm:.6f}, {result['seconds']:.1f}s")
@@ -222,8 +253,13 @@ def main():
             log("Saving actual trainable weights and complete FP32-master/AdamW state for the stage transition")
             path = args.output / "stage1_resume.pt"
             checkpoint = {
-                "model": {name: value.detach() for name, value in model.named_parameters() if value.requires_grad},
-                "optimizer": optimizer.state_dict(), "global_step": global_step, "stage": stage,
+                "model": {
+                    name: value.detach()
+                    for name, value in model.named_parameters() if value.requires_grad
+                },
+                "optimizer": optimizer.state_dict(),
+                "global_step": global_step,
+                "stage": stage,
                 "base_revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
                 "flow_convention": "h3_t1_clean_data_minus_noise",
                 "steps": stages,
@@ -247,11 +283,18 @@ def main():
     assert frozen_after == frozen_before
     assert parameter_signature(model) == signature
     report = {
-        "status": "passed", "scope": "Full original 33B H3; real 448x832 video and Qwen3-VL layer-50 features; single-process layer placement",
+        "status": "passed",
+        "scope":
+        "Full original 33B H3; real 448x832 video and Qwen3-VL layer-50 features; single-process layer placement",
         "total_parameters": sum(p.numel() for p in model.parameters()),
         "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
-        "added_parameters": 0, "devices": devices, "steps": stages, "global_step": global_step,
-        "frozen_sample_digest": frozen_after, "optimizer_resume": "passed", "cluster_job_launched": False,
+        "added_parameters": 0,
+        "devices": devices,
+        "steps": stages,
+        "global_step": global_step,
+        "frozen_sample_digest": frozen_after,
+        "optimizer_resume": "passed",
+        "cluster_job_launched": False,
         "fresh_process_resume": args.resume is not None,
         "pretrained_native_block_parity": native_parity,
         "flow_convention": "h3_t1_clean_data_minus_noise",

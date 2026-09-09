@@ -1,0 +1,15 @@
+parents: [worldviews_reference.yaml]
+# All WorldViews settings remain at their original keys. H3-specific geometry
+# lives here so the dataset keeps sampling in the original physical units.
+h3:
+  checkpoint: ${oc.env:MVH3_CHECKPOINT}
+  vae: ${oc.env:MVH3_VAE}
+  text_cache: ${oc.env:MVH3_TEXT_CACHE,local/qwen3_layer50}
+  stage: 1
+  stage1_steps: 10000
+  short_frames: 77
+  logdir: local/worldviews
+  camera_policy: replace_every_ar_interval
+  scale_conditioning: spatial_rotary
+  text_max_length: 512
+  compile_cache: local/compile

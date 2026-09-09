@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from mvh3.camera import apply_camera, precompute_camera, rotvec_to_matrix, wigner_rotation
+from h3.modules.camera import apply_camera, precompute_camera, rotvec_to_matrix, wigner_rotation
 
 
 def poses(batch=2, count=3):

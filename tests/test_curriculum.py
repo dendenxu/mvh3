@@ -4,8 +4,8 @@ import json
 import torch
 import yaml
 
-from mvh3.curriculum import short_mono_windows
-from mvh3.masking import CLEAN, CONDITION, NOISY, TokenLayout
+from dataset.curriculum import short_mono_windows
+from h3.modules.masking import CLEAN, CONDITION, NOISY, TokenLayout
 
 
 def test_all_views_and_tails_retained():
@@ -22,15 +22,16 @@ def test_all_views_and_tails_retained():
 
 def test_both_stages_use_the_same_full_sources():
     configs = Path(__file__).resolve().parents[1] / "configs"
-    short = yaml.safe_load((configs / "stage1_short_mono.yaml").read_text())
-    full = yaml.safe_load((configs / "stage2_long_multiview.yaml").read_text())
-    assert short["data"]["reference"] == full["data"]["reference"]
-    assert short["data"]["subset"] is None and full["data"]["subset"] is None
-    assert len(json.loads((configs / short["data"]["reference"]).read_text())["datasets"]) == 19
-    assert short["data"]["spatial_views"] == 1 and short["data"]["views_as_batch"]
-    assert short["model"] == full["model"]
-    assert short["model"]["added_trainable_parameters"] == 0
-    assert short["transition"]["preserve_optimizer"] and short["transition"]["preserve_global_step"]
+    from omegaconf import OmegaConf
+    from utils.config import load_config
+    short = load_config(configs / "stage1_short_mono.yaml")
+    full = load_config(configs / "stage2_long_multiview.yaml")
+    assert OmegaConf.to_container(short.dataset) == OmegaConf.to_container(full.dataset)
+    assert len(short.dataset.datasets) == 19
+    assert short.h3.stage == 1 and full.h3.stage == 2
+    assert short.model == full.model
+    assert short.ar_lr == full.ar_lr == 1e-5
+    assert short.h3.short_frames == 77
 
 
 def test_masks_obey_teacher_forcing_and_view_isolation():

@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import yaml
+from omegaconf import OmegaConf
+import runtime_env
+from utils.config import load_config
 
 
 def main():
@@ -17,15 +20,11 @@ def main():
     parser.add_argument("--reference-inventory", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    first = yaml.safe_load((args.configs / "stage1_short_mono.yaml").read_text())
-    second = yaml.safe_load((args.configs / "stage2_long_multiview.yaml").read_text())
-    references = [(args.configs / stage["data"]["reference"]).resolve() for stage in (first, second)]
-    if references[0] != references[1]:
+    first = load_config(args.configs / "worldviews.yaml")
+    second = load_config(args.configs / "worldviews_stage2.yaml")
+    recipe = OmegaConf.to_container(first.dataset, resolve=True)
+    if recipe != OmegaConf.to_container(second.dataset, resolve=True):
         raise ValueError("The two stages must use the identical source mixture")
-    expanded = os.path.expandvars(references[0].read_text())
-    if "${" in expanded:
-        raise ValueError("Set MVH3_DATA_ROOT and MVH3_DATA_ROOT3 before auditing the data")
-    recipe = json.loads(expanded)
     original = yaml.safe_load(args.reference_config.read_text())["dataset"]
     if recipe != original:
         raise ValueError("The dataset recipe differs from the frozen WorldGen reference")
@@ -48,16 +47,27 @@ def main():
         row = next(parquet.iter_batches(batch_size=1, columns=sorted(required))).to_pylist()[0]
         if any(row[column] is None for column in required):
             raise ValueError(f"Missing first-row video/text/geometry in {path}")
-        result = {"source": path.name, "type": source["type"], "rows": parquet.metadata.num_rows,
-                  "geometry_column": geometry_column, "columns": parquet.schema_arrow.names}
+        result = {
+            "source": path.name,
+            "type": source["type"],
+            "rows": parquet.metadata.num_rows,
+            "geometry_column": geometry_column,
+            "columns": parquet.schema_arrow.names
+        }
         sources.append(result)
         print(f"PASS {source['type']}: {parquet.metadata.num_rows:,} rows; {geometry_column}; {path.name}", flush=True)
     total = sum(source["rows"] for source in sources)
     if total != inventory["source_rows_sum"]:
         raise ValueError("Summed source rows differ from the frozen inventory")
-    report = {"status": "passed", "identical_stage_sources": True, "exact_reference_dataset_settings": True,
-              "source_count": len(sources), "source_rows_sum": total, "sources": sources,
-              "scope": "Parquet metadata and first-row schema; does not validate full-family sampling or every video"}
+    report = {
+        "status": "passed",
+        "identical_stage_sources": True,
+        "exact_reference_dataset_settings": True,
+        "source_count": len(sources),
+        "source_rows_sum": total,
+        "sources": sources,
+        "scope": "Parquet metadata and first-row schema; does not validate full-family sampling or every video"
+    }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(f"All {len(sources)} source entries / {total:,} rows match both stages and the full reference.")

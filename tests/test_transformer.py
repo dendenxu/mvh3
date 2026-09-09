@@ -4,18 +4,11 @@ import pytest
 import torch
 
 from diffusers import MiniMaxH3Transformer3DModel
-from mvh3 import MVH3Transformer3DModel
-from mvh3.masking import CLEAN, CONDITION, NOISY, TokenLayout
-from mvh3.training import attention_parameters, flow_matching_loss, parameter_signature
+from h3 import MVH3Transformer3DModel
+from h3.modules.masking import CLEAN, CONDITION, NOISY, TokenLayout
+from h3.utils.training import attention_parameters, flow_matching_loss, parameter_signature
 
-
-def tiny_model(cls=MVH3Transformer3DModel):
-    return cls(
-        num_attention_heads=2, attention_head_dim=128, hidden_size=32,
-        num_layers=3, num_refiner_layers=2, ffn_dim=64, in_channels=24,
-        audio_in_channels=32, patch_size=(1, 2, 2), text_dim=32,
-        freq_dim=32, time_embed_hidden_dim=32, time_embed_dim=16, rope_freq_dim=16,
-    )
+from fixtures_h3 import tiny_model
 
 
 def inputs(audio_tokens=0, batch=2):
@@ -30,16 +23,21 @@ def inputs(audio_tokens=0, batch=2):
     pose = torch.zeros(batch, 2, 10)
     pose[..., :2] = 1
     pose[:, 1, 7] = 0.15
-    camera_indices = torch.full((length,), -1, dtype=torch.long)
+    camera_indices = torch.full((length, ), -1, dtype=torch.long)
     camera_indices[video_indices] = torch.tensor([0, 0, 1, 1, 0, 0, 1, 1])
     return dict(
         hidden_states=torch.randn(batch, 8, 96),
         audio_hidden_states=torch.randn(batch, audio_tokens, 32),
         encoder_hidden_states=torch.randn(batch, 3, 32),
-        timestep=torch.tensor([0.5]), timestep_indices=torch.zeros(length, dtype=torch.long),
-        token_tags=tags, position_ids=position_ids, video_indices=video_indices,
-        text_indices=text_indices, audio_indices=audio_indices,
-        camera_pose=pose, camera_indices=camera_indices,
+        timestep=torch.tensor([0.5]),
+        timestep_indices=torch.zeros(length, dtype=torch.long),
+        token_tags=tags,
+        position_ids=position_ids,
+        video_indices=video_indices,
+        text_indices=text_indices,
+        audio_indices=audio_indices,
+        camera_pose=pose,
+        camera_indices=camera_indices,
     )
 
 
@@ -98,7 +96,8 @@ def test_existing_attention_update_and_stage_resume(checkpointing):
     assert len(changed) == 18
     assert parameter_signature(model) == signature
     buffer = io.BytesIO()
-    torch.save(dict(model=model.state_dict(), optimizer=optimizer.state_dict(), global_step=12, stage="short_mono"), buffer)
+    torch.save(dict(model=model.state_dict(), optimizer=optimizer.state_dict(), global_step=12, stage="short_mono"),
+               buffer)
     buffer.seek(0)
     checkpoint = torch.load(buffer, weights_only=True)
     resumed = tiny_model()
@@ -129,8 +128,8 @@ def test_future_media_and_caption_cannot_leak_across_three_blocks():
     torch.manual_seed(7)
     model = tiny_model().eval()
     data = inputs(audio_tokens=2, batch=1)
-    kind = torch.full((13,), CONDITION, dtype=torch.long)
-    chunk = torch.full((13,), -1, dtype=torch.long)
+    kind = torch.full((13, ), CONDITION, dtype=torch.long)
+    chunk = torch.full((13, ), -1, dtype=torch.long)
     scope = torch.zeros(13, dtype=torch.long)
     vi = data["video_indices"]
     kind[vi[:4]], kind[vi[4:]] = CLEAN, NOISY

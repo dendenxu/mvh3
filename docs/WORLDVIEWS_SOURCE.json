@@ -1,0 +1,279 @@
+{
+  "repository": "WorldViews",
+  "commit": "4bec9ba354b5fe5fe8aeadb34a12c4314d3cc37a",
+  "files": {
+    "dataset/__init__.py": {
+      "source_sha256": "36c251d14bc40a088a3af8148b2e05c78e08fd4e401f6b62b3a8f7b687e36fba",
+      "local_path": "dataset/__init__.py",
+      "local_sha256": "d74d84a1a44e1626ef3171839211c8dc3c6017ac95a7151842d7667ef78d2518"
+    },
+    "dataset/aggregator.py": {
+      "source_sha256": "137b04f5d18bd1d31bca1d02447a3d4f4a0fd730ace3b0c597c6e399a93cdd9d",
+      "local_path": "dataset/aggregator.py",
+      "local_sha256": "2beda27c59c5c078a32368385d862bda17cf301b48d57a8c4592943abd0c8a87"
+    },
+    "dataset/dynamic.py": {
+      "source_sha256": "a936d21443859d44a19aafdae1fc4a4d418b065ddeb37d36543dbe3c6f7dd867",
+      "local_path": "dataset/dynamic.py",
+      "local_sha256": "e351ff696ceeff48ae3bc1de9a796c42d86d831609a8b7a22bd434be2de81ce1"
+    },
+    "dataset/fps_remap.py": {
+      "source_sha256": "f2f998c4b3ed76f6340fd34a40ed8dda2d03a608e47245d0609b346329cf1db8",
+      "local_path": "dataset/fps_remap.py",
+      "local_sha256": "f2f998c4b3ed76f6340fd34a40ed8dda2d03a608e47245d0609b346329cf1db8"
+    },
+    "dataset/multiview.py": {
+      "source_sha256": "924dc40ce6f83e8b92fef83e0116e0178d3f34941e849ec4dfb86cec4a0e0d7c",
+      "local_path": "dataset/multiview.py",
+      "local_sha256": "bb5b4398688a8d99cd948c854f4f20c38c0b794f17ca3d73882eae7b81993c3a"
+    },
+    "dataset/mvgame.py": {
+      "source_sha256": "ef5eca76e4babab97eacc27a619459d132a3f3c240e4dcb358cc1d4213108cbf",
+      "local_path": "dataset/mvgame.py",
+      "local_sha256": "b510f3435f3c230cd0a13b4a1c251e2e0fc9d87b670d353ed485b15bf5513748"
+    },
+    "dataset/presampled.py": {
+      "source_sha256": "44b7196b1ca6f8a2641e1dafda09f163681c102daa93fe7fac8e039cc6d21950",
+      "local_path": "dataset/presampled.py",
+      "local_sha256": "6c692a6c7fc37fbd1b657d7223dee0320753a0f07b941d19526052080b58aa2b"
+    },
+    "dataset/static.py": {
+      "source_sha256": "9db1a856e1d70898a220b7e4745836153647df3d6083488b6b47c4b47616631f",
+      "local_path": "dataset/static.py",
+      "local_sha256": "e57f00f0a4f1c6696379244ebc34c35809f171ecc8282221d3e317bc1062ff2a"
+    },
+    "utils/base_utils.py": {
+      "source_sha256": "948d1634b772e7b2278b92121ce3d41905094e6c4f8a3994e841843ddfeea22b",
+      "local_path": "utils/base_utils.py",
+      "local_sha256": "948d1634b772e7b2278b92121ce3d41905094e6c4f8a3994e841843ddfeea22b"
+    },
+    "utils/blend_utils.py": {
+      "source_sha256": "4f916854d46009f8a5290443ef4c8d478aa1e84320a227e9d20b7a6ed65d0cfd",
+      "local_path": "utils/blend_utils.py",
+      "local_sha256": "11f11485032560e1c3f8eee838d934933551781b209de90e6416600f210e178c"
+    },
+    "utils/config.py": {
+      "source_sha256": "0ea5ae7e0ef2caf738d5990f200c9e4e993a00eb207bd9fa33a4219df83f6801",
+      "local_path": "utils/config_utils.py",
+      "local_sha256": "4711726bd2e8bc8f76335c609fd2cf487cb330e1ccaeed9d361d478f5d7f6b21"
+    },
+    "utils/console.py": {
+      "source_sha256": "0216f1dd653f1969702d6ddd13a5cdf1c66e1c3b9a9ac3fda11199186104e7f1",
+      "local_path": "utils/console.py",
+      "local_sha256": "488d5a2d6c562686c14836e37ff9aac40efc7aeb5487c68a48e1eb53b6f64cb1"
+    },
+    "utils/data.py": {
+      "source_sha256": "3810f5d1a8a50fdde144a0f91e1d108372b52fdf51fc56c2fee7b89162235c26",
+      "local_path": "utils/data.py",
+      "local_sha256": "6d47cf6a2a3e5dc65f571c614385e0f471610a8370d749c17bed02fc3ac9b573"
+    },
+    "utils/distributed.py": {
+      "source_sha256": "c8add61c017351acab107dc9f061268a3e198503e6d9d66d3f2a00b3996e578d",
+      "local_path": "utils/distributed.py",
+      "local_sha256": "120425d74520070ba0aa5fc01cd41f5dae7985f02d1657a518e50fd2157730b3"
+    },
+    "utils/easyvolcap.py": {
+      "source_sha256": "4ff40c7bfa0edb6e72765cb022176c61708b89ec9c66f4dc17fe53212ebb4988",
+      "local_path": "utils/easyvolcap.py",
+      "local_sha256": "fa02430679fb83e7695ac9594ddd6ff59fb60236faecfb9e24e16200fc366afe"
+    },
+    "utils/ext_utils.py": {
+      "source_sha256": "9dd43d248fb0a892abbea4865539144a745adb88798393bc4206379f3fb26200",
+      "local_path": "utils/ext_utils.py",
+      "local_sha256": "d4de4d9e38a1c1c3178364add4cb72caa648d167e6a616c47e3749bd8d1e6c13"
+    },
+    "utils/_easy_utils_ext.py": {
+      "source_sha256": "94227aea06ac30f2c509c069ca0724971674e59916cbf88a9566bf190ff95f14",
+      "local_path": "utils/_easy_utils_ext.py",
+      "local_sha256": "5b984d6c39565e76f19d45e79fad0bac97ab07b0fda8091e6608d0ebc5a71c1b"
+    },
+    "utils/math_utils.py": {
+      "source_sha256": "56c8a24b27a8e61a3dab696184fe3d42e4d98cf47c56b6f15cbe97c30b3442a8",
+      "local_path": "utils/math_utils.py",
+      "local_sha256": "56c8a24b27a8e61a3dab696184fe3d42e4d98cf47c56b6f15cbe97c30b3442a8"
+    },
+    "utils/misc.py": {
+      "source_sha256": "6d0404c972980b60f807c46706ee693c7b3274fb813dad89c56a0bbd25bca612",
+      "local_path": "utils/misc.py",
+      "local_sha256": "6d0404c972980b60f807c46706ee693c7b3274fb813dad89c56a0bbd25bca612"
+    },
+    "utils/mvgame.py": {
+      "source_sha256": "d3d1af06a0bcbc590a5850f9b11a2f69f4f7011e76940343f43a03cc80014c7b",
+      "local_path": "utils/mvgame.py",
+      "local_sha256": "ee096930698fe99a6fbc6d0d2c22c4a8aa600aa98429ef21926df34fcd7530ba"
+    },
+    "utils/parallel.py": {
+      "source_sha256": "f3b371ace0c024eacd8cf251e820d707bd4114833c8cb10136919a5dbe1f39f0",
+      "local_path": "utils/parallel.py",
+      "local_sha256": "56bb41f42a1c5436ec1eac83bc5f4c8ea4080cf6cdfb10f8b1f21d4fe49088be"
+    },
+    "utils/ray_utils.py": {
+      "source_sha256": "81bbb3fe9cdbc017b16223a6205c8e69749f29fea25deba5f912af9128e6adc1",
+      "local_path": "utils/ray_utils.py",
+      "local_sha256": "bbac502af9e8d2bede55f9e1d9e4e2d457ee1939cc56321fb6b069fd97c30f5c"
+    },
+    "utils/scheduler.py": {
+      "source_sha256": "79e1b7d605323918664c4033025e03bc4661709e973018aee3d9983b6e1d2f46",
+      "local_path": "utils/scheduler.py",
+      "local_sha256": "79e1b7d605323918664c4033025e03bc4661709e973018aee3d9983b6e1d2f46"
+    },
+    "utils/timer.py": {
+      "source_sha256": "5e5be4caa178215eabb0a94e664393ee6b3d90ee8b2b6bcd65e04618faca2381",
+      "local_path": "utils/timer.py",
+      "local_sha256": "5392b66c5b74d4b279db7424fb0e694c5d638491d9e0675395456e4371c13cb4"
+    },
+    "utils/undist_utils.py": {
+      "source_sha256": "0b421a4d14b327176de425b361706829a604aab0e82dcbaf8de4168492cb8e34",
+      "local_path": "utils/undist_utils.py",
+      "local_sha256": "0b421a4d14b327176de425b361706829a604aab0e82dcbaf8de4168492cb8e34"
+    },
+    "utils/video.py": {
+      "source_sha256": "04204fc0b0178e53335f7fe578815d2afc0ae62a1a691853807eced4dce52959",
+      "local_path": "utils/video.py",
+      "local_sha256": "8f48bde9c085013d0e7c32fa17885e7e4e869e817e84a1775ecd0a04a4fbfcb2"
+    },
+    "utils/viewpack.py": {
+      "source_sha256": "d13f061b68931e34fece9b56513385357d8cefb69d451ebfc025d55771e20699",
+      "local_path": "utils/viewpack.py",
+      "local_sha256": "d13f061b68931e34fece9b56513385357d8cefb69d451ebfc025d55771e20699"
+    },
+    "utils/visualize.py": {
+      "source_sha256": "fb1f3c174ca5c5516b8dcf3ff59fb3b3dbd3477209e2f38f1596e3a0b9b2354d",
+      "local_path": "utils/visualize.py",
+      "local_sha256": "fb1f3c174ca5c5516b8dcf3ff59fb3b3dbd3477209e2f38f1596e3a0b9b2354d"
+    },
+    "wan/utils/fm_solvers.py": {
+      "source_sha256": "f7254e3ac5c6c6715317cdf991d927cde61c1400ad73851be41fc51ce5ecba5d",
+      "local_path": "h3/utils/fm_solvers.py",
+      "local_sha256": "8039b826fcc6c38b872d547227767eb2b2345ef19dad313061c157a07d864b5a"
+    },
+    "wan/utils/fm_solvers_unipc.py": {
+      "source_sha256": "aefcba250179c82aafaa5dc56128c13b22e55b549755452e08a01e288234674c",
+      "local_path": "h3/utils/fm_solvers_unipc.py",
+      "local_sha256": "5349729355ce6479667b9deca229810e087ca0deb6ce7f2605764285755f0d97"
+    },
+    "utils/_dataset_ext.py": {
+      "source_sha256": "c6501ddbb33121661f1b0c4e38e0a67f11365c849a422e2d4941a518826a2077",
+      "local_path": "utils/_dataset_ext.py",
+      "local_sha256": "27e3dd1eb9a896576f1a31ee98b15989ca4436100b8a4722934e6fb4c75d5127"
+    },
+    "utils/cpp/easy_utils_ext.cpp": {
+      "source_sha256": "11ae68c683bc4d430978d64948bf0e6a46869deb7a77d8cfe912af143ef05197",
+      "local_path": "utils/cpp/easy_utils_ext.cpp",
+      "local_sha256": "5b577b3206d0109993eb47468a4fac5741d41cbeb9f61bd29ad2245d00111e2d"
+    },
+    "utils/cpp/random_video_ext.cpp": {
+      "source_sha256": "0e2f7c56c2322a713f7f1b63288677fd1046677997214a81586b5e7e860a1f1f",
+      "local_path": "utils/cpp/random_video_ext.cpp",
+      "local_sha256": "29ff08f49374e4b315c45acb4ef242d46ea6559bd100ea224cbe866514e86944"
+    },
+    "utils/compile.py": {
+      "source_sha256": "66c4dfc64e314b417c1ec20f07d933d9cdd1a32439d3448187d1bb7999ab04ad",
+      "local_path": "utils/compile.py",
+      "local_sha256": "ff1809fd7769968b73705ed79a15a5a2144a49c9d27b516e846698c7af9c3323"
+    },
+    "utils/mem_utils.py": {
+      "source_sha256": "9c28fe41b4f799592bd6be877f67edafb88e07c3abd25fec3f89524047aecbde",
+      "local_path": "utils/mem_utils.py",
+      "local_sha256": "9c28fe41b4f799592bd6be877f67edafb88e07c3abd25fec3f89524047aecbde"
+    },
+    "utils/memory.py": {
+      "source_sha256": "477a6a3dcba0f9c574fa1caedff8d2a614a77e47c6a42a1a632b669a910edf29",
+      "local_path": "utils/memory.py",
+      "local_sha256": "7e8726f1732ca2ece91bb6f2e5504f984773d0856b9bda084e3aed40f88b2379"
+    },
+    "utils/offload.py": {
+      "source_sha256": "55701a4f36423ba6a447a2f26e2720467692b27000f5a6fbcafb2c5fa8b03c06",
+      "local_path": "utils/offload.py",
+      "local_sha256": "55701a4f36423ba6a447a2f26e2720467692b27000f5a6fbcafb2c5fa8b03c06"
+    },
+    "utils/cam_utils.py": {
+      "source_sha256": "db10b091e0ea9fe173136d7c3a93b571882ee624997be17f8c5c71ac617fd51e",
+      "local_path": "utils/cam_utils.py",
+      "local_sha256": "ee5781323b2ea33f272f6adef2bdcaf4ed92d7d3ccb1097885a28d063a2f0167"
+    },
+    "utils/chunk_utils.py": {
+      "source_sha256": "3014b65caf6491a9e345d4fd94a8b18cf17bbb60196d414879bdd35de96232a9",
+      "local_path": "utils/chunk_utils.py",
+      "local_sha256": "41bf5983248d00abe6f5ca61618dff4a37ff6e65c634891785bddc6b69452029"
+    },
+    "utils/rot_utils.py": {
+      "source_sha256": "b50b0eaedaa8dd229d3baff3f7cf44050be4196a11d8eaa4737b935ff4f2ff57",
+      "local_path": "utils/rot_utils.py",
+      "local_sha256": "b50b0eaedaa8dd229d3baff3f7cf44050be4196a11d8eaa4737b935ff4f2ff57"
+    },
+    "utils/quat_utils.py": {
+      "source_sha256": "dc88d1fbd33292440ff06750f4a747d2193c46fc26543998a96d0e4de104eaaa",
+      "local_path": "utils/quat_utils.py",
+      "local_sha256": "ade7d9a0ceab5b339ac58687224bc7a1de3ea6ced9b4fab67624091790841516"
+    },
+    "utils/image_utils.py": {
+      "source_sha256": "89d1fce97d58f6b440763d7e0070bf6a7cc6a7c184a398ad6ef265165d1a98c3",
+      "local_path": "utils/image_utils.py",
+      "local_sha256": "89d1fce97d58f6b440763d7e0070bf6a7cc6a7c184a398ad6ef265165d1a98c3"
+    },
+    "utils/color_utils.py": {
+      "source_sha256": "835bd458fdb8812e367b066656a3e17491c48feda3d3c18a0f757d75a531a9b2",
+      "local_path": "utils/color_utils.py",
+      "local_sha256": "34c4a0686ee8a55f5f150e75c9d68aa0f20f8403eddd3e334050f5d129f25df0"
+    },
+    "utils/relight_utils.py": {
+      "source_sha256": "321dd0fe8872149eb8087b53b641ce800d7231105c2748bb09a46a3f121077f8",
+      "local_path": "utils/relight_utils.py",
+      "local_sha256": "a1bd7d81ed7aee2eea08e1be3d32b75eb272ab6abde68019f6bfee362b6e864d"
+    }
+  },
+  "adaptations": [
+    "Local import paths; all original samplers retained",
+    "T5 caches replaced with raw captions and full Qwen3-VL layer-50 features",
+    "H3-prefixed C++ extension cache names",
+    "Explicit FSDP/SP rank binding and single-shard-group topology",
+    "Local flow-solver config/output helpers without Diffusers runtime",
+    "Retain the compiled random-move sampler through its local utility import",
+    "Extract the two original color transfer functions from relight_utils",
+    "Keep main/autograd thread pinning independent of decoder workers"
+  ],
+  "source_note": "Source hashes identify the imported working-tree snapshots; commit records their base revision, not a claim that the source worktree was clean.",
+  "diffusers_expansion": {
+    "repository": "huggingface/diffusers",
+    "commit": "d30c748f5f5d0925a5af14dc0e6a6de983025e63",
+    "files": {
+      "models/transformers/transformer_minimax_h3.py": {
+        "source_sha256": "1926b1bc15a5bebda05e3dc8cde1b3955d56641ba7f8f9d6e90c8f78c66ae30c",
+        "local_files": {
+          "h3/modules/model.py": "7e81fd1068f42c5125e5a987ab87d61326a436cb612216e4e62cc72f7987f67a"
+        }
+      },
+      "models/autoencoders/autoencoder_kl_minimax_h3.py": {
+        "source_sha256": "4c3c9745ee27d16ff343c4998244bad41cd8f4213f0029cf7ce11ebb6d72ca1b",
+        "local_files": {
+          "h3/modules/vae.py": "219f257198cbe6838a61dc7ab805b8c37fa2f9d69ec469430a7633bdd216e1c0"
+        }
+      },
+      "models/autoencoders/vae.py": {
+        "source_sha256": "8e6abad3bd7b7806dd9c6c451b2438641ef728d7884e6bfed37b867f719b98fc",
+        "local_files": {
+          "h3/modules/vae_distribution.py": "887ff3cf9d8ca633069238e9c1d2dd11cd5dab15d4dc77ffede6a5ab0cd0b813"
+        }
+      },
+      "models/embeddings.py": {
+        "source_sha256": "4eb810f715786eb1f24f2a4641e529817f7c951b9caf2f7925811329a03ec796",
+        "local_files": {
+          "h3/modules/layers.py": "cfe6d66614d6afa26b6814bee46b5ff189bd37c1c494fadf40a1fcc2b4b82ee4"
+        }
+      },
+      "schedulers/scheduling_minimax_h3.py": {
+        "source_sha256": "307d5bf755337ef00c47237f9ac8be116e627d26e1df3b5f0bd504a80f9de8dd",
+        "local_files": {
+          "h3/utils/scheduler.py": "2c57cdbbc69a4749ac872affdf6521c6f440d54bceeb495c930b880ca3af1e4e"
+        }
+      },
+      "utils/torch_utils.py": {
+        "source_sha256": "64877dee5d2d9374a0cd89e889a2c6be82d902578ceea2b1dc4831747dd4568e",
+        "local_files": {
+          "h3/utils/random.py": "7987b0e0d0f9397feece0538981007e7a24f2ad3bd4de7bed1b05dad67d40822"
+        }
+      }
+    }
+  }
+}

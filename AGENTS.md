@@ -5,7 +5,9 @@ Read `docs/MVH3.md` before changing the training port.
 - Work in this H3 checkout. `origin` is `https://github.com/dendenxu/mvh3`; `upstream` is the official MiniMax repository.
 - Camera conditioning must add zero trainable parameters. Change analytic encoding on the existing attention Q/K and train existing H3 weights. Do not add AR branches, LoRA, camera MLPs, adapters, gates, or expanded projections.
 - Use two stages on the same full WorldGen source mixture: short monocular clips first, then full-duration/multiview continuation. In stage 1 every view is an independent batch item, never a spatially packed joint-attention view. Preserve source views and partial tails.
-- Use the frozen Wigner bases in `mvh3/wigner_bases.json`; never regenerate them.
+- Keep the WorldViews-style layout: `trainer/`, `model/`, `pipeline/`, `dataset/`, `utils/`, and `h3/modules/`. Core H3 code is local PyTorch; do not reintroduce Diffusers runtime wrappers.
+- Use the frozen Wigner bases in `h3/modules/wigner_bases.json`; never regenerate them.
+- Treat `configs/worldviews.yaml` as canonical. Replace every `ar_interval=2` original attention with matrix PRoPE at `ar_lr=1e-5`; intervening original attention uses first-frame decomposed PRoPE. Do not restore the superseded all-attention/1e-6 probe recipe.
 - Native H3 RoPE has split-half T/H/W pairs. Camera transforms must preserve T and the unrotated tail. Camera schema is normalized-intrinsic c2w `[fx, fy, cx, cy, rotvec(R_c2w), C_world]`.
 - Native H3 joint attention includes text/audio. Causal/view masks must cover all modalities and the text refiner. Validate future-perturbation invariance across multiple layers.
 - H3 uses clean timestep `t=1` and data-ward target `clean-noise`. Use `t=1-sigma`, including noisy context; text inherits the generated-video timestep. Check against the pinned H3 scheduler rather than copying Wan conventions.

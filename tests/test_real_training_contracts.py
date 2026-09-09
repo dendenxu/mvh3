@@ -2,10 +2,10 @@ import io
 
 import torch
 
-from mvh3.data import temporal_layout
-from mvh3.masking import TokenLayout
-from mvh3.optim import MasterAdamW
-from mvh3.packing import teacher_forcing_batch
+from h3.data import temporal_layout
+from h3.modules.masking import TokenLayout
+from h3.utils.optim import MasterAdamW
+from h3.packing import teacher_forcing_batch
 from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
 
 
@@ -46,7 +46,8 @@ def test_fp32_master_accumulates_sub_bf16_updates_and_resumes():
 
 
 def test_padding_cannot_relay_into_valid_tokens():
-    layout = TokenLayout(torch.tensor([0, 1, 2, 2]), torch.tensor([-1, 0, 1, 1]), torch.tensor([-1, 0, 0, 0]), True, torch.tensor([True, True, True, False]))
+    layout = TokenLayout(torch.tensor([0, 1, 2, 2]), torch.tensor([-1, 0, 1, 1]), torch.tensor([-1, 0, 0, 0]), True,
+                         torch.tensor([True, True, True, False]))
     mask = layout.dense()
     assert not mask[:3, 3].any()
     assert mask[3].sum() == 1 and mask[3, 3]
@@ -57,15 +58,18 @@ def test_context_mixing_timestep_and_geometry_match_packed_rows():
     camera = torch.zeros(2, 27, 10)
     camera[..., :2] = 1
     camera[1, :, 7] = 1
-    features = dict(latents=torch.ones(2, 24, 27, 2, 2), camera_pose=camera,
-                    rotary_frames=temporal.rotary_frames, valid_frames=temporal.valid, fps=16,
+    features = dict(latents=torch.ones(2, 24, 27, 2, 2),
+                    camera_pose=camera,
+                    rotary_frames=temporal.rotary_frames,
+                    valid_frames=temporal.valid,
+                    fps=16,
                     prompt_embeds=torch.ones(1, 3, 5120))
     inputs, target, mask = teacher_forcing_batch(features, "cpu", sigma=0.3, context_noise_std=0)
     times = inputs["timestep"][inputs["timestep_indices"]]
     assert torch.all(times[:3] == 0.7)
     assert times[3] == 1
-    assert torch.all(times[4:3+54] == 0.8)
-    assert torch.all(times[3+54:] == 0.7)
+    assert torch.all(times[4:3 + 54] == 0.8)
+    assert torch.all(times[3 + 54:] == 0.7)
     assert inputs["camera_indices"][3:7].tolist() == [0, 1, 2, 3]
     assert inputs["camera_pose"][0, 1, 7] == 1
     assert int(mask.sum()) == 2 * 23 - 1

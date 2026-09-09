@@ -1,121 +1,220 @@
-# MVH3: camera encoding on the original H3 attention
+# MVH3 training port
 
-This checkout starts from the official MiniMax H3 source snapshot and adds a camera-conditioned transformer with exactly the original parameter names and shapes. `origin` is `https://github.com/dendenxu/mvh3`. The original inference documentation is retained in `README.md` and the translated README files.
+Read the root README for the directory map and commands. The active entry is
+`main.py -c configs/worldviews.yaml`; old stage filenames are compatibility aliases
+for this same recipe, not alternate optimizer settings.
 
-## Agreed experiment
+## Source and architecture
 
-Use the same largest WorldGen data mixture in two stages. Stage 1 splits every source view into independent short monocular clips. Stage 2 continues those weights and optimizer state on the full duration/view distribution, retaining the naturally monocular sources. Camera encoding is deterministic: no new attention branch, camera network, adapter, LoRA, projection width, or trainable parameter group.
+The official MiniMax repository was checked live at snapshot
+`d21241f0a4b3acbb34c97dae47fa417b7065e438`. It supports multiple inference runtimes
+and does not mandate Diffusers. It supplies original VAE Python code and original
+and converted checkpoint configurations, but no standalone raw transformer
+training loop. Local H3 implementations were expanded from Diffusers commit
+`d30c748f5f5d0925a5af14dc0e6a6de983025e63`, retaining its computation and strict
+state names. `h3/modules/model.py` and `h3/modules/vae.py` are plain `nn.Module`
+classes; helper layers, attention kernels and numerical schedulers are local.
+The optional full audio conversion command retains a lazy Diffusers import;
+the video training/inference runtime does not import it.
 
-The initial trainable scope is all original main-block Q/K/V/O projections and Q/K RMS norms, approximately 7.71B of H3's 33.12B parameters. `mvh3.training.attention_parameters` selects this scope. The proposed initial LR is `1e-6`; it has not been tuned on H3. The remaining transformer weights, text encoder/refiner, and VAEs stay frozen in this initial recipe. Training additional original weights later would also preserve the zero-new-parameter contract.
+Original transformer conversion reads every one of 535 source tensors across
+13 shards, checks all expected shapes/dtypes, reorders per-head interleaved QKV,
+and swaps the original SwiGLU gate/value halves. Nothing is partially initialized.
+The full native model has 50 blocks, residual width 5376, 56 heads of width 128,
+FFN width 14336, video latent width 24 and text feature width 5120.
 
-## Camera implementation
+## WorldViews mapping
 
-`mvh3/transformer.py` is based on Diffusers' pinned H3 implementation. The forward path accepts `camera_pose` and `camera_indices` explicitly, including during activation checkpoint recomputation; it does not hide per-batch camera state on a mutable attention processor. Poses are precomputed once per forward into rotations and trigonometric coefficients. They are activations, not model parameters or checkpoint buffers.
+| WorldViews behavior | H3 implementation |
+| --- | --- |
+| Complete resolved YAML | `configs/worldviews_reference.yaml`, with environment substitutions for dataset roots |
+| Added AR branch every second layer | Existing main attention at those indices uses matrix PRoPE, original projections train at 1e-5 |
+| Base first-frame decomposed attention | Intervening existing attention uses first-frame decomposed PRoPE, frozen at sa_lr=0 |
+| Dual high/low noise experts | One released H3 denoiser receives both original 50/50 sampled noise ranges |
+| Wan text cross-attention/T5 cache | Native joint H3 attention with full Qwen3-VL layer-50 text; no T5 cache reuse |
+| Added scale MLP | `log(scale)` shifts existing video spatial RoPE coordinates relative to text; no added weights |
+| Wan VAE geometry | Native H3 padding, temporal camera anchors, spatial stride 16 |
+| Five-Wan-latent AR chunks | Same physical boundaries: first 17 source frames, then 20-frame chunks |
+| TF / RF | Shifted weighted flow loss, noisy context, history dropout, synchronized low-range RF and warmup |
+| Parallel optimization | Ulysses SP, mixed-storage FSDP, FP32 trainable shards/AdamW, CPU offload, activation checkpointing, block compile |
+| Validation / inference | Separate original val_dataset, condition sampler, CFG5, 70-step UniPC, CPU-offloaded history KV |
 
-H3's 128-channel heads use the layout `[T16,H16,W16,T16,H16,W16,tail32]`. Paired channels are split across the two 48-channel halves. The implementation gathers these pairs, applies WorldGen's decomposed camera transform to 28 existing channels in H and 28 in W, and scatters back. All temporal pairs, four remaining channels per spatial axis, and the tail stay unchanged. The tail contains pretrained features; it is not spare or newly allocated capacity.
+The scale encoding and attention allocation are explicit adaptations, not a
+claim of numerical equivalence to Wan. H3 head width cannot hold Wan's exact
+channel allocation unchanged. The native packed joint attention also has no
+separate text cross-attention cache to which `kv_offload_crossattn` could apply.
+The high/low offload-switch knob has no second H3 expert to switch.
 
-The camera representation is c2w `[fx,fy,cx,cy,rotvec(R_c2w),C_world]`, with normalized intrinsics and already locked/scaled geometry. H uses D1+D2, x translation, part of z translation, fx/cx. W uses D1+D3, y translation, the remaining z frequencies, fy/cy. Translation frequencies are `[1,2,4,8,16]`; intrinsics use frequency 4 on `[log(fx),log(fy),cx,cy]`. The frozen WorldGen Wigner basis JSON is copied byte-for-byte. Both Q and K receive the same orthogonal transform after native RoPE; V and output projections retain their original computation. This starts with the decomposed encoding, not WorldGen's separate matrix-PRoPE AR branch.
+All remaining parameters stay frozen. Existing every-second-layer attention
+contains 3,853,523,200 trainable parameters; all original model parameters total
+33,122,992,896, with no added parameter or state-dict key. FP32 optimizer/storage
+avoids rounding small updates away in BF16. Mixed precision casts gathered weights
+for forward computation; checkpoint shards retain FP32 trainable weights.
 
-`camera_pose` has shape `[batch, num_poses, 10]`; `camera_indices` has one index per packed token. Every video token addresses its aligned pose; text/audio use `-1`. Omitted camera arguments reproduce upstream computation exactly. Identity poses reproduce it within Wigner basis floating-point tolerance.
+## Camera and time
 
-## Two stages and data
+The pose schema is canonical c2w `[fx,fy,cx,cy,rotvec(R_c2w),C_world]`, normalized
+intrinsics and already WorldViews-locked/scaled geometry. Dataset projection
+matrices are carried independently and are never reconstructed from the pose in
+the production path. Four subframe projections per H3 latent preserve per-head
+camera sampling; SP head offsets use the original global head group.
 
-Both `configs/stage1_short_mono.yaml` and `configs/stage2_long_multiview.yaml` reference `configs/worldviews_dataset.json`. This preserves the full resolved dataset settings from WorldGen, including all 19 source entries, source-specific sampling powers, and augmentation settings. The original inventory summed to 1,372,262 source Parquet rows on 2026-09-09; this is not a count of sampled training examples. `pre200` is a distinct subset and is not substituted here.
+Native H3 heads are `[T16,H16,W16,T16,H16,W16,tail32]`. Camera transformations preserve
+all temporal pairs and the unrotated tail. Matrix PRoPE uses 20 existing slow H and
+20 slow W channels; only those spatial RoPE pairs are removed. Q is transformed by
+P-transpose, K/V by P-inverse, and output by P with inverse RoPE. Decomposed PRoPE
+uses 28 H and 28 W channels with the frozen WorldViews Wigner bases. These are
+activations, never new model parameters.
 
-Set `MVH3_DATA_ROOT` and `MVH3_DATA_ROOT3` to the two local dataset roots when resolving the data reference. `scripts/verify_data_sources.py` compares the entire dataset section with the frozen WorldGen configuration, checks that both stages resolve the same mixture, and reads live metadata/first rows for all 19 Parquets. Augmented game geometry lives in `video_meta`; the other source families expose `pose`. The exact original reference and inventory are preserved under ignored `local/`. This audit establishes source/configuration identity, not full-family sampling or decoding of every video. The stage files remain reference recipes rather than a full-data distributed training launcher.
+Scale conditioning adds `log(pose_stable_factor)` to existing H/W coordinates for
+video rows, leaving text/audio coordinates and all temporal phases unchanged.
+The resulting sine/cosine factors remain bounded. The native timestep MLP and
+AdaLN inputs are unchanged. Feeding scale into the pretrained time MLP was rejected
+after full-weight tests: scale 10 produced a delta RMS of 11.88 versus native
+timestep embedding RMS 0.009-0.028, with losses above 9,500. Checkpoints from that
+obsolete `existing_time_embedding` recipe must not be resumed; the recipe digest
+rejects them.
 
-| Setting | Stage 1 | Stage 2 |
-| --- | --- | --- |
-| Source mixture | All 19 sources | Same 19 sources |
-| Video size/cadence | 448x832, 16 FPS | Same |
-| Duration | At most 77 actual sampled frames per independent clip | Full reference duration distribution |
-| View relationship | One view per batch item; all source views retained | Cross-view attention for synchronized multiview samples |
-| Parameters | Original main attention only; zero added | Same topology, continued weights/optimizer/global step |
-| Camera | Decomposed PRoPE on existing spatial Q/K channels | Same encoding |
+H3 uses clean timestep `t=1`, noise fraction `sigma=1-t`, and velocity
+`clean-noise`. The x0 estimate is `x_t + sigma*v`. The original UniPC solver accepts
+`noise-clean`, so the sign flips only at its interface. Text receives the generated
+video timestep; clean KV history is explicitly rebuilt at its clean timestep so
+joint text modulation does not change previously cached media keys.
 
-The 77-frame maximum is the physical limit of WorldGen's 20-Wan-latent short stage. It is not 20 H3 latents. `short_mono_windows` is a source-frame split primitive and keeps all partial tails; it is not the old Wan presampled splitter. H3 needs its own VAE padding/pose mapping and regenerated caches. Stage lengths remain unset until a real pretrained memory/throughput check and learning curves inform the decision.
+The VAE maps `17*n+5` source frames to `5*n+2` latents. Camera interval ends are
+`[0,4,8,12,16]+17*n`; rotary interval starts are `[0,1,5,9,13]+17*n`. The native clock
+is 40 units/second. Each source view is independently spatially padded to a multiple
+of 32; edge patches retain fractional pixel-area loss weights. Temporal tails are
+retained, padded intervals are masked out. The local VAE handles short decode tails
+by repeating to a normal overlap chunk and cropping the real physical duration.
 
-`mvh3.data.temporal_layout` pads before encoding to the H3 VAE's `17*n+5` geometry, retains the real partial tail, and excludes fully padded intervals from attention and loss. The causal camera anchors are `[0,4,8,12,16]+17*n`; native rotary interval starts are `[0,1,5,9,13]+17*n`. The rotary clock uses 40 units/second at the adapted 16 FPS. `mvh3.packing` assigns the old five-Wan-latent chunk a physical 20-frame duration rather than relabeling it as five H3 latents.
+Masks cover video, text and inactive audio padding, including text refinement, to
+prevent future captions or modality relays. Sparse flex attention has an explicit
+compile-only guard: exceeding Dynamo's variant budget cannot silently allocate a
+quadratic eager score matrix.
 
-The bounded training path implements the reference linear context mixture with noise 0.2/std 0.1, sampled independently per view, and the first frame of view 0 as clean conditioning. H3's native convention is `t=1-sigma`, clean data at `t=1`, and velocity target `clean-noise`. Context receives `t=1-context_noise`; text inherits the generated-video timestep. A regression compares noise construction and `x0 = x_t + sigma*v` directly with the pinned H3 scheduler. The Wan velocity sign and clean-end timestep must not be copied into H3. History dropout (0.1), RF warmup (10,000), accumulation (1), and SP/FSDP sizes (8) remain recorded reference settings; RF/history-dropout and distributed integration are pending.
+## Two stages and state
 
-`mvh3.optim.MasterAdamW` maintains FP32 master weights and AdamW moments while updating the existing mixed-precision model parameters. This preserves small `1e-6` updates that BF16-only optimization can round away. Masters and moments are optimizer state, not added model parameters.
+Stage 1 uses all 19 original sources. Every view and every at-most-77-frame window
+is consumed, including partial tails. Stage 2 resumes the same weights, optimizer
+and step with the reference duration/view distribution. Already queued short clips
+are consumed instead of discarded. `h3.stage1_steps=10000` is a provisional,
+configurable default aligned with the existing RF warmup, not a measured optimum.
 
-## Visibility and training boundaries
+Checkpoints are unique generations, each containing per-rank trainable shards,
+AdamW, RNG, pending raw/encoded source queues and RF state. The manifest/latest
+pointer is committed only after every rank finishes. Resume enforces identical
+recipe and FSDP/SP topology; frozen original weights are loaded from the base again.
+There is no resharding tool. Worker-local decoder/prefetch state is not serialized;
+do not claim exact future-sample replay after restarting a DataLoader.
 
-`mvh3.masking.TokenLayout` defines visibility for the whole packed sequence. CONDITION tokens read only available CONDITION tokens. CLEAN media read available conditions and clean chunks up to the current chunk. NOISY media read available conditions, earlier CLEAN chunks, and their own NOISY chunk. Noisy targets cannot see same-chunk clean answers. Global conditions cannot collect local conditions and relay them elsewhere. Stage-1 views belong on the batch axis; explicit scope masks also support isolation within a document.
+## Verification record
 
-The text refiner receives the text restriction of a dense mask or `TokenLayout`. For a raw `BlockMask`, callers must supply its text mask explicitly. This prevents future chunk captions from leaking through text refinement before the joint blocks. The module exposes dense reference masks with a size guard and PyTorch flex block-mask construction for larger layouts. The GPU path explicitly compiles flex attention with `fullgraph=True`: falling back to eager flex would materialize quadratic attention scores. The verification runner sets a bounded compile-variant allowance for its devices and shapes.
+Reports are local, ignored artifacts. They must say `status=passed`, and the
+corresponding processes must exit successfully. A forward, existing checkpoint,
+or partially written report alone is insufficient.
 
-This port currently rejects camera/masked context parallel execution until the sequence-sharding adapter is implemented and validated. The inherited native H3 context-parallel hooks alone cannot shard camera indices or guarantee global mask semantics. Do not bypass this check by setting SP=8 only in a config.
+- All 19 source entries / 1,372,262 summed source rows match both stages and the
+  frozen source inventory. The decode audit uses 8 preload rows per source and
+  actually samples/decodes one source document per entry; it is not an exhaustive
+  media-integrity scan.
+- All 40 local CPU tests pass. They compare full parameter topology and exact no-camera outputs
+  against pinned Diffusers, verify causal/view isolation across three blocks,
+  gradients, stage continuation, matrix inverse behavior, native flow direction,
+  and local VAE/scheduler parity. Runtime imports are tested with Diffusers blocked.
+  Scale conditioning preserves the original timestep embeddings and all temporal
+  and text phases exactly; visualization output failures follow `raise_vis_error`.
+- The complete 2,603,868,984-parameter video VAE was checked on real 448x832, 22-frame
+  source video: encode posterior, normalized sampled latents and decoded pixels
+  match exactly (maximum error 0); the single-frame tail and four subframe camera
+  preparation paths pass. Peak allocated memory: 13.97 GiB on one H100.
+- Two-rank tiny SP/FSDP with block compilation completed mono and multiview updates,
+  matched the unsharded loss/gradient oracle, exactly restored trainable shards and
+  AdamW moments, and matched cached/recomputed CFG rollout exactly. The final
+  process exits succeeded with the host teardown workaround described below.
 
-The strict streaming loader now consumes every original transformer tensor, including the full AdaLN weights, with upstream QKV reordering and SwiGLU conversion. Real video/text feature generation uses the full released VAE and Qwen3-VL-32B layer 50. `read_parquet_clip` is a bounded native MP4 reader with matched image crop/intrinsics and c2w world locking; unsupported windowed/list-schema rows fail explicitly. It does not implement the full augmented-game/static-self-view/multicamera sampler, pose-scale augmentation, or dataset-wide caches. RF rollout/KV caching and distributed masked attention/save-resume remain required before a full-data cluster run. The existing Wan T5/16-channel latent caches and Wan AR weights cannot be loaded into this model. No cluster job is launched by the setup or tests.
+- Complete Qwen3-VL-32B FSDP encoding matches the saved full-encoder layer-50
+  features exactly (123 x 5120); different ranks hitting/missing the text cache
+  complete without collective mismatch, and cached features restore exactly.
+- Every one of 130 top-level resolved config keys matches the live WorldViews
+  YAML, including all 19 training and 19 validation source entries.
+- The C++ random-move wrapper matches the compiled extension exactly on a seeded
+  257-sample trajectory. Installation includes the tested FA4/Cutlass versions and
+  all active video-decoding dependencies. Main/autograd threads use the original
+  fixed-count setting, independently of the dataset worker thread count.
 
-## Dependencies and validation
+The full original 33,122,992,896-parameter model completed four real-feature updates
+with SP=8, FSDP=8, BF16 forward, FA4, activation checkpointing, block compilation,
+CPU-offloaded parameters and FP32 AdamW. The inputs are full-VAE/full-Qwen features
+from real 448x832 video, with the reference camera centering and pose-stable factors.
+These fixed documents test the model runtime; live decoding and text encoding were
+validated separately as described above.
 
-The H3 transformer requires the pinned Diffusers commit in `pyproject.toml`. The downloaded bundle can use sibling `diffusers/src` and `python_deps` through `scripts/runtime_env.py` without upgrading the WorldGen environment. For a standalone checkout, install into a dedicated environment with `pip install -e '.[test,verification]'`; use an appropriate existing PyTorch/CUDA build. The local GPU validation environment uses PyTorch 2.12.1+cu129, Transformers 5.9.0, and H100 80 GiB devices.
+| Input | Packed tokens | Weighted loss | Gradient norm before clipping |
+| --- | ---: | ---: | ---: |
+| Stage 1: 1 x 77 frames | 16,872 | 0.282203 | 0.750333 |
+| Stage 2: 2 x 90 frames after restore | 36,888 | 0.492176 | 1.281207 |
+| 8 x 37 frames | 49,992 | 0.625744 | 0.834202 |
+| 1 x 297 frames | 63,824 | 0.210931 | 0.177268 |
+
+Every step changes trainable weights, retains frozen weight samples, and stays
+finite. The stage-1 checkpoint exactly restores every trainable shard and the full
+AdamW state. This process exited successfully; its rank-0 peak allocated GPU memory
+was 9.90 GiB for the backbone check, excluding the separately tested VAE/text
+encoder, dataset queues, CUDA allocator reservation and other processes. The timings
+include first-shape compilation and do not establish production throughput.
+
+A separate fresh eight-rank process reloads the stage-1 checkpoint, checks every
+trainable shard and AdamW tensor exactly, then performs the two-view update. Its
+loss matches the continuous run exactly at 0.4921759367. Gradient norm is
+1.28149188 versus 1.28120673, relative error 0.00022256 (0.0223%), within the
+explicit BF16 backward tolerance of 0.001. This process also exits successfully.
+Restored state is exact; backward computation is not claimed to be bitwise
+identical across fresh compiled processes.
+
+Reproduce the bounded full-model check with the prepared real feature directories:
 
 ```bash
-python scripts/test_cpu.py
+torchrun --standalone --nproc_per_node=8 scripts/verify_worldviews_runtime.py \
+  --full --compile --checkpoint "$MVH3_CHECKPOINT" --features local/real_probe \
+  --extra-features local/envelope_8x37/long_multiview.pt \
+  --extra-features local/envelope_1x297/long_multiview.pt \
+  --output local/worldviews_full8_final
+
+torchrun --standalone --nproc_per_node=8 scripts/verify_worldviews_runtime.py \
+  --full --compile --checkpoint "$MVH3_CHECKPOINT" --features local/real_probe \
+  --resume local/worldviews_full8_final/ckpt/latest.json \
+  --compare-to local/worldviews_full8_final/verification.json \
+  --output local/worldviews_full8_fresh_verified
 ```
 
-Tests use tiny random CPU models. They compare parameter topology/state keys and no-camera outputs against upstream, check camera response and preserved temporal/tail channels, exercise attention-only optimizer updates with and without activation checkpointing, round-trip model/optimizer state across a stage boundary, and perturb future clean video/audio and local captions across three layers. They also verify stage-1 batch independence and full source/view/tail preservation. Passing these tests does not establish pretrained generation quality, production GPU memory, or distributed readiness.
+The FA4 BF16 dense/sparse check passes with maximum output error 0.023438 and
+relative input/Q-gradient errors 0.000979/0.002961, including exact three-layer
+future-perturbation invariance. FA4 indirect history-mask indices use explicit
+Int32 casts; CPU or non-FA4 checks alone did not catch this kernel requirement.
 
-### Real pretrained verification
+### Local NCCL teardown
 
-The executable verification path loads the complete 33,122,992,896-parameter model, compares the loaded first/middle/last blocks with pinned upstream computation, trains all 7,707,046,400 existing main-attention parameters, writes an actual 100.49 GiB stage checkpoint, and compares every restored trainable weight/master/AdamW state tensor before continuing. It uses one process with intact layers placed across eight local GPUs. This is not SP, FSDP, or a throughput benchmark for distributed training.
+On the current PyTorch 2.12.1 / NCCL 2.29.7 host, `destroy_process_group` hangs in
+communicator shutdown even after successful barriers. The issue reproduces in a
+minimal two-rank test, with and without the network plugin and with eagerly bound
+groups. Set `MVH3_NCCL_ABORT_ON_EXIT=1` on this host: the local cleanup helper first
+synchronizes every rank and all CUDA work, then releases the communicators with
+PyTorch's abort cleanup. Successful reports are written after this cleanup. This
+is an explicit host workaround, not a claim that upstream graceful shutdown was
+fixed. It does not change the training collectives. A single shard group uses the
+numerically equivalent FULL_SHARD path; multi-group training retains HYBRID_SHARD.
 
-Real source features prepared with the complete released VAE and text encoder cover these shapes at 448x832 and 16 FPS. The 297-frame and 8-view shapes exercise duration/view boundaries from the reference; they do not exhaust the full sampler's shape distribution.
-
-| Source frames | Views | Padded frames | H3 latents per view / valid | Packed teacher-forcing tokens |
-| --- | --- | --- | --- | --- |
-| 77 | 1 | 90 | 27 / 23 | 19,779 |
-| 90 | 2 | 90 | 27 / 27 | 39,435 |
-| 37 | 8 | 39 | 12 / 12 | 70,011 |
-| 297 | 1 | 311 | 92 / 88 | 67,099 |
-
-```bash
-python scripts/verify_data_sources.py \
-  --reference-config local/worldviews_reference.yaml \
-  --reference-inventory local/worldviews_data_reference.json \
-  --output local/full_source_verification.json
-python scripts/probe_gpu_attention.py --device cuda:0 --output local/gpu_attention_parity.json
-python scripts/prepare_real_probe.py --checkpoint /path/to/FL2VA \
-  --parquet /path/to/native_multicamera.parquet --row 0 --views 0,1 \
-  --frames 90 --short-frames 77 --device cuda:0 --output local/real_probe
-python scripts/verify_pretrained.py --checkpoint /path/to/FL2VA \
-  --features local/real_probe --output local/pretrained_final
-python scripts/verify_pretrained.py --checkpoint /path/to/FL2VA \
-  --features local/real_probe --output local/fresh_resume \
-  --resume local/pretrained_final/stage1_resume.pt
-```
-
-Feature preparation can reuse the same source caption's already computed full-encoder features with `--reuse-text-from local/real_probe`, and the same converted VAE with `--vae-cache local/real_probe/vae`. To exercise additional real stage-2 shapes, pass their feature files with repeated `--extra-features PATH` arguments. The source audit does not need GPU execution. The other GPU commands are bounded diagnostic runs and should run on available local devices.
-
-Only a completed `verification.json` with `status=passed` establishes success for a particular run. `progress.json` records individual successful updates; an existing checkpoint file or completed forward alone is not a successful two-stage verification. Earlier probes with the reversed Wan time/velocity convention are invalid for H3 training and their checkpoints are rejected by the corrected resume loader. The runner also checks sampled frozen-weight preservation and unchanged complete parameter topology. A few finite training steps do not establish convergence, camera-control quality, or production readiness.
-
-### Recorded local results (2026-09-09, UTC+8)
-
-The corrected full-pretrained run completed six actual forward/backward/AdamW updates, with `status=passed`. These use fixed real features and target noise fraction 0.5; they are execution/correctness checks, not a training curve. Timings include first-use compilation where applicable.
-
-| Global step | Real shape (views x frames) | Loss | Gradient norm | Update seconds |
-| --- | --- | --- | --- | --- |
-| 1 | 1 x 77 | 0.24300867 | 0.285197 | 90.2 |
-| 2 | 1 x 77 | 0.24322049 | 0.432458 | 12.8 |
-| 3, after save/restore | 2 x 90 | 0.23259926 | 0.156642 | 106.6 |
-| 4 | 2 x 90 | 0.23258391 | 0.155951 | 24.2 |
-| 5 | 8 x 37 | 0.26231951 | 0.136742 | 166.7 |
-| 6 | 1 x 297 | 0.19223946 | 0.152630 | 106.7 |
-
-Every step changed both FP32 masters and the existing model-weight sample digest; total model parameters remained 33,122,992,896, with 7,707,046,400 trainable and zero added. All stage checkpoint trainable weights, masters, AdamW moments, hyperparameters and step counters matched after restore. First/middle/last original blocks matched upstream exactly without camera/mask. The highest per-device PyTorch allocated-memory peak over the training run was 48.30 GiB. Frozen-weight sampling and complete parameter topology checks passed. Full runtime reports/checkpoints remain ignored under `local/`.
-
-A second, fresh process loaded the original base and the saved stage-1 checkpoint, restored global step 2, and performed the first two-view update again. It completed with `status=passed`. Its step-3 loss (0.23259925842285156), gradient norm (0.15664238807317138), and sampled model/master digests before and after the update matched the continuous run exactly. This establishes actual optimizer continuation beyond merely deserializing a checkpoint in the same process.
-
-The separate BF16 CUDA kernel oracle compared sparse attention against dense SDPA: maximum output absolute error 0.015625, input-gradient relative error 0.000864, and Q-weight-gradient relative error 0.002863. Three-layer future-perturbation invariance was exact. All 22 CPU cases passed. The full-source audit matched all 19 live Parquet entries / 1,372,262 source rows and the complete resolved dataset section in both stages.
+Earlier full-weight single-process layer placement checks are separate from this
+SP/FSDP verification. Short checks establish executable contracts, not
+convergence, pretrained visual quality under CFG5, or robust long-horizon control.
+The full source mixture has not undergone a long training run. Multi-node hybrid
+replication and remote HDFS copying are implemented but not exercised by these
+local checks; long-training compile-variant coverage is also unestablished.
 
 ## Provenance
 
-- Official source snapshot: `MiniMax-AI/MiniMax-H3@d21241f0a4b3acbb34c97dae47fa417b7065e438`. It was downloaded as an archive, so the local Git history begins from a snapshot and does not claim upstream ancestry.
-- H3 transformer/Diffusers dependency: `huggingface/diffusers@d30c748f5f5d0925a5af14dc0e6a6de983025e63`; Apache license in `licenses/DIFFUSERS-APACHE-2.0.txt`, source header retained.
-- Full original FL2VA weights: `MiniMaxAI/MiniMax-H3@42ed227ee7df40d41602854ae760620d6eb651fe`, stored outside this Git checkout in `../ckpts/MiniMax-H3/FL2VA/`. All 84 selected files / 144,051,241,571 bytes passed full checksums on 2026-09-09 at 16:59:32 UTC+8.
-- WorldGen resolved full-data config SHA256: `a161359868d0412a8b307d5ce616ad3e8d1b949c5fd22c962cdc28116bf35fc5`.
+Original FL2VA weights: `MiniMaxAI/MiniMax-H3@42ed227ee7df40d41602854ae760620d6eb651fe`;
+84 files / 144,051,241,571 bytes were fully checksummed. Weights stay outside Git.
+`docs/WORLDVIEWS_SOURCE.json` records imported source hashes and local adaptations.
+Apache licensing for expanded Diffusers code is in `licenses/DIFFUSERS-APACHE-2.0.txt`.

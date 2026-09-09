@@ -4,7 +4,6 @@
 from pathlib import Path
 import sys
 
-
 root = Path(__file__).resolve().parents[1]
 for candidate in (root.parent / "python_deps", root.parent / "diffusers" / "src", root):
     if candidate.is_dir():
