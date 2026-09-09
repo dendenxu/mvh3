@@ -1,0 +1,226 @@
+{
+  "data_path": "${MVH3_DATA_ROOT}/mvgame/mvgame_15k_process/qwen3_capture_cached_video_meta_filtered_modern.parquet",
+  "batch_size": 1,
+  "gen_size": 20,
+  "mv_size": 4,
+  "height": 448,
+  "width": 832,
+  "overfit": false,
+  "overfit_seq_sample": [
+    0,
+    1,
+    1
+  ],
+  "overfit_vid_sample": [
+    0,
+    1,
+    1
+  ],
+  "num_workers": 2,
+  "prefetch_factor": 2,
+  "per_worker_threads": 8,
+  "boot_size": 0,
+  "timeout": 0,
+  "cycle_sampler": true,
+  "pose_norm_target": 0,
+  "pose_stable_factors": [
+    0.1,
+    1,
+    10,
+    100,
+    1000
+  ],
+  "seq_sample": [
+    0,
+    null,
+    1
+  ],
+  "view_acc_abs_min": 0.5,
+  "view_acc_abs_max": 1.5,
+  "mv_chaos": 0.5,
+  "off_perturb_std": 0.25,
+  "disable_augmentation_ratio": 1.0,
+  "type": "concat",
+  "model_fps": 16,
+  "fps_targets": [
+    16
+  ],
+  "image_aug": false,
+  "gamma_correction": false,
+  "parallel_view_decode": true,
+  "exposure_clamp": true,
+  "dynamic_mv_size": 1,
+  "dynamic_gen_size": 75,
+  "long_gen_size": 75,
+  "long_gen_split": 0.25,
+  "short_paths": [
+    [
+      1,
+      75
+    ],
+    [
+      2,
+      45
+    ],
+    [
+      3,
+      35
+    ],
+    [
+      4,
+      25
+    ],
+    [
+      5,
+      20
+    ],
+    [
+      8,
+      15
+    ],
+    [
+      12,
+      10
+    ]
+  ],
+  "shape_pool": [
+    [
+      8,
+      10
+    ],
+    [
+      5,
+      15
+    ],
+    [
+      4,
+      20
+    ],
+    [
+      3,
+      25
+    ],
+    [
+      2,
+      40
+    ],
+    [
+      1,
+      75
+    ]
+  ],
+  "shape_pool_weights": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "datasets": [
+    {
+      "type": "mvgame",
+      "data_path": "${MVH3_DATA_ROOT}/mvgame/aug_qwen3_mvgame_6g_strictblack_nearclip_cut_fpsmin_walign4_wrefl_blobdense_v3.parquet",
+      "dataset_fps": 25,
+      "disable_augmentation_ratio": 0.0,
+      "sampling_weight_power": 0.75
+    },
+    {
+      "type": "mvgame_raw",
+      "data_path": "${MVH3_DATA_ROOT}/mvgame/raw_video_qwen3_cached_schema_gamefilt_inherit_motioncut_nearclip_yellowfix_blurfov_nearclip2.parquet",
+      "num_cameras": 25,
+      "dataset_fps": 25,
+      "video_reader": "CFRVideoReader",
+      "video_path_template": "video/{c:06d}.mp4",
+      "disable_augmentation_ratio": 0.0,
+      "max_fov_h_deg": 100,
+      "pre_resize": false,
+      "image_aug": true,
+      "gamma_correction": true,
+      "sampling_weight_power": 0.725
+    },
+    {
+      "type": "egoexo4d",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/nymeria/nymeria_shape_posecuts_captioned_cached_synccleaned.parquet",
+      "num_cameras": 2,
+      "dataset_fps": 15,
+      "sampling_weight_power": 0.75,
+      "video_reader": "CFRVideoReader"
+    },
+    {
+      "type": "egoexo4d",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/egoexo4d/egoexo4d_captioned_shape_cached_repose_clean_loose_aria90.parquet",
+      "num_cameras": 5,
+      "dataset_fps": 30,
+      "sampling_weight_power": 0.75
+    },
+    {
+      "type": "waymo_e2e",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/waymo_end2end_16fps_hq/waymo_end2end_16fps_hq_qwen3_cached_relative.parquet",
+      "num_cameras": 8,
+      "dataset_fps": 16
+    },
+    {
+      "type": "waymo_perception",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/waymo_perception_16fps_hq/waymo_perception_16fps_hq_qwen3_cached_relative.parquet",
+      "num_cameras": 5,
+      "dataset_fps": 16
+    },
+    {
+      "type": "static_dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/dl3dv10k_yunzhi_filter/dl3dv10k_yunzhi_filter_cached_clean_relative_shape_vipe_rerun_posefiltered_shape.parquet"
+    },
+    {
+      "type": "static_dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/sekai_real_walking_hq/sekai_real_walking_hq_static_cached_relative_shape_posecuts_telecut.parquet"
+    },
+    {
+      "type": "static_dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/spatialvid_hq_yunzhi_filtered/spatialvid_hq_yunzhi_filtered_static_cached_relative_shape_posefiltered.parquet"
+    },
+    {
+      "type": "static_dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/realestate10k/realestate10k_qwen3_cached_relative_shape_metric_posefiltered.parquet"
+    },
+    {
+      "type": "static_dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/sekai_real_drone/sekai_real_drone_cached_static_shape_relative_posefiltered_vlm_rescaled_slerp_drotfiltered_hoverfiltered_reposevggt.parquet"
+    },
+    {
+      "type": "static_dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/spatialvid/spatialvid_nohq_filtered_static_posefiltered_dav3rescale_reposevggt.parquet",
+      "sampling_weight_power": 0.675
+    },
+    {
+      "type": "dynamic",
+      "data_path": "${MVH3_DATA_ROOT}/svreal/aria/epic_fields_undist/epic_fields_undist_cut_scaled_captioned_cached.parquet",
+      "video_reader": "CFRVideoReader"
+    },
+    {
+      "type": "dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/sekai_real_walking_hq/sekai_real_walking_hq_dynamic_cached_relative_shape_posecuts_telecut.parquet"
+    },
+    {
+      "type": "dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/spatialvid_hq_yunzhi_filtered/spatialvid_hq_yunzhi_filtered_dynamic_cached_relative_shape_f81_t3.375_posefiltered.parquet"
+    },
+    {
+      "type": "dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/sekai_real_drone/sekai_real_drone_cached_dynamic_shape_relative_posefiltered_vlm_rescaled_slerp_drotfiltered_hoverfiltered_reposevggt.parquet"
+    },
+    {
+      "type": "dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/dynpose100k++/dynpose100k++_cached_relative_shape_posefiltered_ratiofilt_slerp_reposevggt.parquet"
+    },
+    {
+      "type": "dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/general_ht/general_ht_480_apsect12or21_length81f_fov40or120_noposejump_shape_qwen3_cached_relative_posefiltered_dav3rescale_reposevggt.parquet",
+      "sampling_weight_power": 0.75
+    },
+    {
+      "type": "dynamic",
+      "data_path": "${MVH3_DATA_ROOT3}/svreal/spatialvid/spatialvid_nohq_filtered_dynamic_posefiltered_dav3rescale_reposevggt.parquet",
+      "sampling_weight_power": 0.65
+    }
+  ]
+}

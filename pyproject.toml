@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mvh3"
+version = "0.1.0"
+description = "Parameter-free camera encoding and two-stage adaptation for MiniMax H3"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.6",
+    "diffusers @ git+https://github.com/huggingface/diffusers.git@d30c748f5f5d0925a5af14dc0e6a6de983025e63",
+    "huggingface-hub==1.30.0",
+    "safetensors>=0.4.3",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["mvh3*"]
+
+[tool.setuptools.package-data]
+mvh3 = ["wigner_bases.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 119

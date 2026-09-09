@@ -1,0 +1,21 @@
+{
+  "official_source": {
+    "repository": "https://github.com/MiniMax-AI/MiniMax-H3",
+    "commit": "d21241f0a4b3acbb34c97dae47fa417b7065e438",
+    "import_method": "archive_snapshot"
+  },
+  "diffusers": {
+    "repository": "https://github.com/huggingface/diffusers",
+    "commit": "d30c748f5f5d0925a5af14dc0e6a6de983025e63"
+  },
+  "checkpoint": {
+    "repository": "MiniMaxAI/MiniMax-H3",
+    "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+    "family": "FL2VA",
+    "files": 84,
+    "bytes": 144051241571,
+    "stored_outside_git": true
+  },
+  "worldgen_reference_sha256": "a161359868d0412a8b307d5ce616ad3e8d1b949c5fd22c962cdc28116bf35fc5",
+  "wigner_bases_sha256": "7a7007cf9a281ccc6902bac5ce65bd3d75aa516a85a26f77a2ed59d91f37bfd2"
+}
