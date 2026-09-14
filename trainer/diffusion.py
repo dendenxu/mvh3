@@ -200,13 +200,20 @@ class DiffusionTrainer:
         # Step 2: Backpropagate and clip the global sharded gradient.
         phase_started = time.monotonic()
         loss.backward()
+        clipping_started = time.monotonic()
+        timings["backward_compute_seconds"] = clipping_started - phase_started
 
         # FSDP computes the norm across parameter shards. A local torch norm
         # would clip each shard differently and change the global update.
         norm = self.model.clip_grad_norm_(cfg.clip_grad_norm)
         if not torch.isfinite(norm):
             raise FloatingPointError(f"Nonfinite gradient at step {self.step}")
-        timings["backward_seconds"] = time.monotonic() - phase_started
+        clipping_finished = time.monotonic()
+
+        # Retain the combined interval for older runs. These wall times include
+        # existing waits; measuring them adds no CUDA synchronization.
+        timings["gradient_clip_seconds"] = clipping_finished - clipping_started
+        timings["backward_seconds"] = clipping_finished - phase_started
 
         # Step 3: Update the FP32 raw weights, then their EMA once.
         phase_started = time.monotonic()
