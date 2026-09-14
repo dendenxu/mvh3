@@ -15,6 +15,7 @@ import torch.distributed as dist
 from omegaconf import OmegaConf
 
 from utils.ema import ShardedEMA
+from utils.random import set_seed
 from utils.tracking import Tracker
 from utils import distributed as groups
 from utils.distributed import canonical_name
@@ -111,7 +112,7 @@ def evaluate(model, objective, documents, cfg, device):
     try:
         for index, document in enumerate(documents):
             for j, sigma in enumerate(cfg.overfit.eval_sigmas):
-                torch.manual_seed(cfg.overfit.eval_seed + index * 100 + j)
+                set_seed(cfg.overfit.eval_seed + index * 100 + j)
                 loss = measure(model, objective, document, device, sigma)
                 if not torch.isfinite(torch.tensor(loss)):
                     raise FloatingPointError("Nonfinite fixed-noise evaluation")
@@ -127,7 +128,7 @@ def generate_samples(model, documents, cfg, device, directory, label, tracker, s
     try:
         planned = []
         for index, document in enumerate(documents):
-            torch.manual_seed(cfg.overfit.generation_seed + index)
+            set_seed(cfg.overfit.generation_seed + index)
             document = DiffusionObjective(cfg).prepare_document(document, device, training=False)
             planned.append(document)
             if groups.get_rank() == 0:
@@ -242,7 +243,7 @@ def main():
         raise ValueError("Launch the requested SP/FSDP topology")
     device = torch.device("cuda", torch.cuda.current_device())
     rank = groups.get_rank()
-    torch.manual_seed(cfg.seed)
+    set_seed(cfg.seed)
     from utils.camera import prepare_camera_geometry
 
     documents = [
@@ -451,9 +452,9 @@ def main():
 
             # A disjoint seed stream makes evaluation repeatable without ever
             # training on its Gaussian noise or changing future training draws.
-            torch.manual_seed(cfg.seed + step)
+            set_seed(cfg.seed + step)
             document = objective.prepare_document(documents[step % len(documents)], device)
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad(set_to_none=False)
             loss, log = objective.compute_loss(model, document, device, step)
             fwd_mem = torch.cuda.memory_allocated() // 1024**2
             if not torch.isfinite(loss):

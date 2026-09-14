@@ -143,6 +143,15 @@ and compiled blocks. FSDP stores trainable shards/gradients in FP32 and casts
 gathered forward weights to BF16. Keep the existing WorldViews environment,
 original FA4 runtime and FSDP boundaries. The grouped backward path belongs to
 H3: queries with identical visible K/V share native varlen backward calls.
+AdamW clears gradients in place, retaining their CPU storage so FSDP does not
+reconstruct the flat gradient during backward.
+
+Training, overfit and inference seed Python, NumPy and Torch and enable
+deterministic library algorithms before model execution. This also fixes
+Inductor reduction selection and repeated-KV gradient accumulation. cuBLAS
+uses a reproducible workspace configuration; cuDNN benchmarking is disabled.
+Text cache identities include this numerical policy. Equal seeds alone do not
+establish reproducibility: compare fresh-process outputs and resumed updates.
 
 Any decision affecting FSDP collective order must agree across replicas.
 Sample metadata travels through SP gather; global noise-range and resampling forcing decisions

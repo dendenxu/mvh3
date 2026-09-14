@@ -169,6 +169,9 @@ class TextEncoder:
         self.tokenizer.padding_side = "right"
         self.wrap, self.model_class = wrap, Qwen3VLForConditionalGeneration
         fingerprint = hashlib.sha256(b"Qwen3VL.hidden_states[50].no_special_tokens.v2")
+
+        # Do not mix features computed with different reduction policies.
+        fingerprint.update(f"deterministic={torch.are_deterministic_algorithms_enabled()}".encode())
         for directory in (checkpoint / "tokenizer", checkpoint / "text_encoder"):
             for path in sorted(directory.iterdir()):
                 if path.is_file():

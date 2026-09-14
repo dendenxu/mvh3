@@ -2,6 +2,7 @@
 """Generator-aware normal sampling used by the native VAE and flow solvers."""
 from __future__ import annotations
 
+import os
 import random
 import logging
 
@@ -70,20 +71,20 @@ def randn_tensor(
     return latents
 
 
-def set_seed(seed: int, deterministic: bool = False):
-    """
-    Helper function for reproducible behavior to set the seed in `random`, `numpy`, `torch`.
+def set_seed(seed: int, deterministic: bool = True):
+    """Seed every random stream and enable reproducible library algorithms.
 
-    Args:
-        seed (`int`):
-            The seed to set.
-        deterministic (`bool`, *optional*, defaults to `False`):
-            Whether to use deterministic algorithms where available. Can slow down training.
+    Call before encoding or model execution. A seed alone does not fix CUDA
+    reductions or Inductor's choice between numerically different reductions.
+    Passing False leaves the current library policy unchanged for diagnostics.
     """
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
-    if deterministic:
-        torch.use_deterministic_algorithms(True)

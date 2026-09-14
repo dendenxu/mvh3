@@ -203,7 +203,9 @@ class DiffusionTrainer:
         timings = {}
 
         # Step 1: Pack the planned sequence and predict its flow target.
-        self.optimizer.zero_grad(set_to_none=True)
+        # Retain CPU gradient storage. Dropping it makes FSDP reconstruct and
+        # clear flat gradients during backward, delaying the next all-gather.
+        self.optimizer.zero_grad(set_to_none=False)
         phase_started = time.monotonic()
         loss, log = self.objective.compute_loss(self.model, document, self.device, self.step, override)
         log["fwd_mem"] = torch.cuda.memory_allocated() // 1024**2

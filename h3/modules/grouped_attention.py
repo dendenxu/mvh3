@@ -83,6 +83,8 @@ def grouped_backward(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     from flash_attn.cute.interface import _flash_attn_bwd
 
+    # Honor the process-wide policy in native FA4 as well as the KV reduction.
+    deterministic = deterministic or torch.are_deterministic_algorithms_enabled()
     batch, heads, size, dim = query.shape
     offsets = torch.arange(batch, device=query.device)[:, None] * size
     q_indices, k_indices = (order[None].add(offsets).flatten() for order in (q_order, k_order))
