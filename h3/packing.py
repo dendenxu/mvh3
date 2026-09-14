@@ -48,8 +48,11 @@ def teacher_forcing_batch(features,
     starts = features["rotary_frames"].to(device)
     camera_ids = frames_for_token * views + views_for_token
     camera_pose = features["camera_pose"].to(device).permute(1, 0, 2).reshape(1, frames * views, 10)
-    valid_video = features["valid_frames"].to(device)[frames_for_token]
     token_chunks = (starts[frames_for_token] / 20).floor().long()
+    requested = features["valid_frames"].to(device)[frames_for_token]
+    token_chunks = token_chunks.clamp_max(token_chunks[requested].max())
+    # The repeated-frame tail is real VAE support, not empty sequence padding.
+    valid_video = torch.ones_like(frames_for_token, dtype=torch.bool)
     first_condition = (frames_for_token == 0) & (views_for_token == 0)
     context[:, first_condition] = clean[:, first_condition]
     length = text_count + 2 * video_count

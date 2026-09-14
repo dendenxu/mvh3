@@ -1,6 +1,23 @@
-parents: [worldviews_reference.yaml]
-# All WorldViews settings remain at their original keys. H3-specific geometry
-# lives here so the dataset keeps sampling in the original physical units.
+parents: [worldviews_reference.yaml, presampled_data.yaml]
+# Keep WorldViews data/optimization/camera settings, with the released H3
+# video-only conditioner and distilled sampler at the default entry point.
+model:
+  timestep_shift: 12.0
+  # H3 has no zero-initialized AR bypass: preserve native RoPE on both streams.
+  prope_unwrapped: false
+  prope_mode: decomposed
+  mv_prope_mode: decomposed
+  scale_cond: false
+dataset:
+  pose_stable_factors: [1.0]
+val_dataset:
+  pose_stable_factors: [1.0]
+timestep_shift: 12.0
+sampling_solver: h3_euler
+sampling_steps: 50
+vis_sampling_steps: 50
+guidance_scale: 1.0
+cfg_rescale_factor: 0.0
 h3:
   checkpoint: ${oc.env:MVH3_CHECKPOINT}
   vae: ${oc.env:MVH3_VAE}
@@ -10,6 +27,10 @@ h3:
   short_frames: 77
   logdir: local/worldviews
   camera_policy: replace_every_ar_interval
-  scale_conditioning: spatial_rotary
+  scale_conditioning: camera_geometry
   text_max_length: 512
   compile_cache: local/compile
+  text_conditioning: fl2va
+  condition_noise: 0.001
+  condition_encode_seed: 42
+  packing_version: native_grid_v7_independent_causal_positions

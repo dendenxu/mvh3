@@ -1,6 +1,7 @@
 """Full-source two-stage WorldViews training on the existing H3 layers."""
 
 from collections import deque
+from contextlib import nullcontext
 from functools import partial
 import gc
 import json
@@ -12,7 +13,7 @@ import torch.distributed as dist
 from omegaconf import OmegaConf
 
 from h3.checkpoint import load_original_transformer
-from utils.config import validate_config
+from utils.config import validate_config, stage_dataset_config
 from h3.distributed.fsdp import configure_model, wrap_model, wrap_text, compile_blocks, parameter_groups, load_compile_cache, save_compile_cache
 from utils.h3_wrapper import raw_collate, source_documents, VideoEncoder, TextEncoder
 from model.diffusion import WorldViewsObjective
@@ -20,16 +21,29 @@ from utils.checkpoint import load_checkpoint, save_checkpoint
 from dataset import create_dataset, cycle, worker_init_fn
 from utils import distributed as groups
 from utils.misc import set_seed
+from utils.tracking import Tracker
+from utils.control import Requests
+from utils.ema import ShardedEMA, inference_weight_kind
+from utils.captions import caption_specs
+from model.chunks import prepare_chunk_plan
 
 
 class SourceStream:
 
     def __init__(self, cfg, video, text, step=0, validation=False):
         self.cfg, self.video, self.text, self.validation = cfg, video, text, validation
-        dc = cfg.val_dataset if validation else cfg.dataset
-        self.dataset = create_dataset(dc, cfg)
+        self.stage = cfg.h3.stage
+        self.pending, self.mixed, self.negative = deque(), deque(), None
+        self.loader_step = step
         seed = cfg.seed if validation else cfg.seed + groups.get_rank() + step
         self.sampler_generator = torch.Generator().manual_seed(seed)
+        self._build_loader(self.stage)
+
+    def _build_loader(self, stage):
+        cfg, validation, step = self.cfg, self.validation, self.loader_step
+        dc = stage_dataset_config(cfg, stage, validation)
+        self.dataset = create_dataset(dc, cfg)
+        seed = cfg.seed if validation else cfg.seed + groups.get_rank() + step
         if validation and cfg.get("inference_sequential_val", False):
             sampler = torch.utils.data.SequentialSampler(self.dataset)
         else:
@@ -44,49 +58,76 @@ class SourceStream:
                                              timeout=dc.timeout if dc.num_workers else 0,
                                              collate_fn=raw_collate,
                                              worker_init_fn=partial(worker_init_fn, seed=seed, dataset=self.dataset))
-        self.loader, self.pending, self.mixed = cycle(loader), deque(), deque()
-        self.stage = 2 if validation else cfg.h3.stage
-        self.negative = None
+        self.loader = cycle(loader)
+        self.dataset_stage = stage
 
     def set_stage(self, stage):
         if stage != self.stage:
             # Finish no partially consumed short source silently: the queued
             # clips remain available as independent examples in stage 2.
             self.stage = stage
+        if hasattr(self, "dataset") and self.dataset_stage != stage:
+            self._build_loader(stage)
 
     def next(self):
+        self.last_timings = dict(decode_seconds=0., vae_seconds=0., text_seconds=0., sp_gather_seconds=0.)
         if self.mixed:
             return self.mixed.popleft()
+        started = time.monotonic()
         if not self.pending:
             self.pending.extend(source_documents(next(self.loader), self.stage, self.cfg.h3.short_frames))
+        self.last_timings["decode_seconds"] = time.monotonic() - started
+        started = time.monotonic()
         document = self.video.prepare(self.pending.popleft(), self.cfg, self.validation)
-        texts, specs = [], []
+        # Each rank owns different raw samples until gather_mixed_batch. Plan
+        # locally before encoding captions; broadcast the whole document later.
+        document = prepare_chunk_plan(document, self.cfg, self.video.device, synchronize=False)
+        self.last_timings["vae_seconds"] = time.monotonic() - started
+        started = time.monotonic()
+        texts, specs, pictures = [], [], []
+        shared_images = [v["condition_image"] for v in document["views"] if v.get("condition_image") is not None]
         for view in document["views"]:
-            prompt = self.cfg.get("prompt_override", "") or view["prompt"] or self.cfg.negative_prompt
-            if view.get("chunk_prompts") and not self.cfg.get("prompt_override", ""):
-                from model.diffusion import chunk_ids
-                count = int(chunk_ids(view["frames"][view["valid"]], self.cfg.chunk_size).max()) + 1
-                start = int((view["source_start"] + 3) // (4 * self.cfg.chunk_size))
-                captions = view["chunk_prompts"]
-                pairs = [(chunk, captions[min(start + chunk, len(captions) - 1)]) for chunk in range(count)]
-            else:
-                pairs = [(-1, prompt)]
+            pairs = caption_specs(view, self.cfg)
+            if self.cfg.h3.get("single_sequence", False):
+                view["texts_by_bd"] = True
+                view["caption_specs"] = pairs
             view_specs = []
             for chunk, caption in pairs:
                 view_specs.append((chunk, len(texts)))
                 texts.append(caption)
+                pictures.append([view["condition_image"]] if document["isolated"] and view.get("condition_image") is not None else shared_images)
             specs.append(view_specs)
-        texts.append(self.cfg.negative_prompt)
-        encoded = self.text(texts)
-        self.negative = encoded[-1]
+        native_image = self.cfg.h3.get("text_conditioning", "text_only") == "fl2va"
+        if native_image:
+            image_encoded = self.text.i2v(list(zip(texts, pictures)))
+            encoded = [value["features"] for value in image_encoded]
+            # Text dropout retains the image semantics of i2v.
+            dropped = self.text.i2v([(self.cfg.negative_prompt, imgs) for imgs in pictures]) if self.cfg.cond_text_dropout_ratio and not self.validation else None
+            self.negative = None
+        else:
+            encoded = self.text([*texts, self.cfg.negative_prompt])
+            self.negative = encoded[-1]
         for view, view_specs in zip(document["views"], specs):
             values = [(chunk, encoded[index]) for chunk, index in view_specs]
+            tag_values = {chunk: image_encoded[index]["tags"] for chunk, index in view_specs} if native_image else {}
             if not self.validation and torch.rand(()).item() < self.cfg.cond_text_dropout_ratio:
-                values = [(chunk, self.negative) for chunk, _ in values]
+                if native_image:
+                    values = [(chunk, dropped[index]["features"]) for chunk, index in view_specs]
+                    tag_values = {chunk: dropped[index]["tags"] for chunk, index in view_specs}
+                else:
+                    values = [(chunk, self.negative) for chunk, _ in values]
             view["texts"], view["text"] = values, values[0][1]
+            view["text_tag_specs"] = tag_values
+            if native_image:
+                view["text_tags"] = tag_values[values[0][0]]
+        self.last_timings["text_seconds"] = time.monotonic() - started
+        if native_image:
+            self.last_timings.update({"text_" + key: value for key, value in self.text.last_i2v_stats.items()})
         # One independently decoded sample per rank; all SP ranks consume
         # every sample. Do not collapse the source batch by broadcasting rank 0.
+        started = time.monotonic()
         self.mixed.extend(groups.gather_mixed_batch(document))
+        self.last_timings["sp_gather_seconds"] = time.monotonic() - started
         return self.mixed.popleft()
 
     def state_dict(self):
@@ -97,7 +138,7 @@ class SourceStream:
 
     def load_state_dict(self, state):
         self.pending, self.mixed = deque(state["pending"]), deque(state["mixed"])
-        self.stage = state["stage"]
+        self.set_stage(state["stage"])
         self.sampler_generator.set_state(state["sampler"])
 
 
@@ -119,6 +160,7 @@ class Trainer:
         self.signature = configure_model(model, cfg)
         self.model = wrap_model(model, cfg)
         compile_blocks(self.model.module, cfg)
+        self.ema = ShardedEMA.from_config(self.model, cfg)
         self.optimizer = torch.optim.AdamW(parameter_groups(self.model, cfg),
                                            betas=(cfg.beta1, cfg.beta2),
                                            weight_decay=cfg.weight_decay,
@@ -130,7 +172,7 @@ class Trainer:
         resume = cfg.resume_ckpt
         if not resume and cfg.auto_resume and (self.logdir / "ckpt/latest.json").is_file():
             resume = str(self.logdir / "ckpt/latest.json")
-        restored = load_checkpoint(self.model, self.optimizer, cfg, resume) if resume else None
+        restored = load_checkpoint(self.model, self.optimizer, cfg, resume, ema=self.ema) if resume else None
         if self.stage == 2 and restored is None:
             raise ValueError("Stage 2 continues a stage-1 checkpoint; set resume_ckpt or use auto_resume")
         if restored:
@@ -147,21 +189,14 @@ class Trainer:
         self.stream.set_stage(self.stage)
         self.val_stream = None
         self.seen_shapes = set()
-        self.wandb = None
-        if groups.get_rank() == 0 and cfg.get("wandb_project"):
-            import wandb
-            self.wandb = wandb.init(project=cfg.wandb_project,
-                                    entity=cfg.wandb_entity,
-                                    name=self.logdir.name,
-                                    dir=str(self.logdir),
-                                    config=OmegaConf.to_container(cfg, resolve=True),
-                                    resume="allow",
-                                    id=self.logdir.name)
+        self.tracker = Tracker(cfg, self.logdir, self.step)
+        self.requests = Requests()
 
     def save(self):
         runtime = dict(stream=self.stream.state_dict(), pending_rf=self.pending_rf, depth=self.depth)
         path = save_checkpoint(self.model, self.optimizer, self.cfg, self.step, self.stage, runtime,
-                               self.logdir / "ckpt")
+                               self.logdir / "ckpt", ema=self.ema)
+        self.tracker.checkpoint(path, self.step)
         if groups.get_rank() == 0:
             import shutil
             complete = sorted(p.parent for p in (self.logdir / "ckpt").glob("step_*/manifest.json"))
@@ -173,7 +208,7 @@ class Trainer:
     def visualize(self, document, index=0):
         from pipeline.ar_inference import generate
         from utils.visualization import write_visualization
-        negative = self.text([self.cfg.negative_prompt])[0]
+        negative = self.text([self.cfg.negative_prompt])[0] if self.cfg.guidance_scale != 1 else None
         outputs = generate(self.model,
                            document,
                            negative,
@@ -186,6 +221,9 @@ class Trainer:
             try:
                 write_visualization(outputs, document, self.video, self.cfg, self.step, groups.get_rank(), index,
                                     self.stage)
+                if getattr(self, "tracker", None):
+                    directory = Path(self.cfg.vis_dir or (self.logdir / "vis")) / f"step_{self.step:09d}" / f"rank{groups.get_rank()}" / f"sample{index:03d}"
+                    self.tracker.media(directory, self.step, f"validation/sample{index}")
             except Exception as error:
                 print(f"Visualization output failed on rank {groups.get_rank()}: {error}", flush=True)
                 failed.fill_(1)
@@ -202,71 +240,116 @@ class Trainer:
         try:
             if self.val_stream is None:
                 self.val_stream = SourceStream(self.cfg, self.video, self.text, validation=True)
+            self.val_stream.set_stage(self.stage)
             count = self.cfg.vis_num_samples if count is None else count
-            for index in range(count):
-                self.visualize(self.val_stream.next(), index)
+            use_ema = inference_weight_kind(self.cfg, validation=True) == "ema"
+            context = self.ema.average_parameters(self.model) if use_ema else nullcontext()
+            with context:
+                for index in range(count):
+                    self.visualize(self.val_stream.next(), index)
         finally:
             restore_rng(state)
 
     def train(self):
+        try:
+            self.train_loop()
+        except BaseException:
+            self.tracker.finish(success=False)
+            raise
+        else:
+            self.tracker.finish()
+
+    def train_loop(self):
         cfg = self.cfg
         self.model.train()
         if cfg.vis_init:
             self.validate()
         while self.step < cfg.max_iters:
             started = time.monotonic()
+            previous_graphs = torch._dynamo.utils.counters["stats"]["unique_graphs"]
             if self.stage == 1 and self.step >= cfg.h3.stage1_steps:
                 self.save()
                 self.stage = 2
                 self.stream.set_stage(2)
             if self.pending_rf is None:
                 document, override, self.depth = self.stream.next(), None, 0
+                timings = dict(self.stream.last_timings)
+                document = self.objective.prepare_document(document, self.device)
             else:
                 document, override = self.pending_rf
+                timings = dict(decode_seconds=0., vae_seconds=0., text_seconds=0., sp_gather_seconds=0.)
+            timings["data_seconds"] = time.monotonic() - started
             shape = tuple(
                 (tuple(v["latent"].shape), v["text"].shape[1], v["condition"] is not None) for v in document["views"])
             if shape not in self.seen_shapes:
                 torch.cuda.empty_cache()
                 self.seen_shapes.add(shape)
             self.optimizer.zero_grad(set_to_none=True)
+            phase_started = time.monotonic()
             loss, log = self.objective(self.model, document, self.device, self.step, override)
+            log["fwd_mem"] = torch.cuda.memory_allocated() // 1024**2
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"Nonfinite loss at step {self.step}")
+            timings["forward_seconds"] = time.monotonic() - phase_started
+            phase_started = time.monotonic()
             loss.backward()
             norm = self.model.clip_grad_norm_(cfg.clip_grad_norm)
             if not torch.isfinite(norm):
                 raise FloatingPointError(f"Nonfinite gradient at step {self.step}")
+            timings["backward_seconds"] = time.monotonic() - phase_started
+            phase_started = time.monotonic()
             if cfg.warmup_steps:
                 for group in self.optimizer.param_groups:
                     group["lr"] = group["initial_lr"] * min(1., (self.step + 1) / cfg.warmup_steps)
             self.optimizer.step()
+            ema_started = time.monotonic()
+            if self.ema is not None:
+                self.ema.update(self.model)
+                log.update(ema_updates=self.ema.num_updates, ema_decay=self.ema.current_decay)
+            timings["ema_seconds"] = time.monotonic() - ema_started
             rf = bool(log.pop("rf")) and (not cfg.resampling_forcing_max_depth
                                           or self.depth < cfg.resampling_forcing_max_depth)
             eligible = torch.tensor(int(rf), device=self.device)
             if cfg.resampling_forcing_global_sync:
                 dist.all_reduce(eligible, op=dist.ReduceOp.MIN)
             x0 = log.pop("x0")
-            self.pending_rf = (document, x0) if eligible.item() else None
+            self.pending_rf = (self.objective.resample_document(document), x0) if eligible.item() else None
             self.depth = self.depth + 1 if self.pending_rf else 0
+            timings["optimizer_and_rf_seconds"] = time.monotonic() - phase_started
+            # A peer can keep compiling while rank zero reuses a warm graph.
+            total_graphs = torch._dynamo.utils.counters["stats"]["unique_graphs"]
+            compile_counts = torch.tensor([total_graphs - previous_graphs, total_graphs], device=self.device)
+            dist.all_reduce(compile_counts, op=dist.ReduceOp.MAX)
             self.step += 1
+            log.update(timings)
             log.update(step=self.step,
                        stage=self.stage,
                        loss=float(loss),
                        grad_norm=float(norm),
                        sf_depth=self.depth,
-                       seconds=time.monotonic() - started)
+                       new_compile_graphs=int(compile_counts[0]),
+                       compile_graphs_total=int(compile_counts[1]),
+                       seconds=time.monotonic() - started,
+                       self=int(override is not None))
+            self.tracker.training(log, self.optimizer, document)
             if groups.get_rank() == 0:
                 print(json.dumps(log), flush=True)
                 if self.step >= cfg.warn_loss_start_step and float(loss) > cfg.warn_loss:
                     print(f"Loss warning at step {self.step}: {float(loss):.6f} > {cfg.warn_loss}", flush=True)
                 with (self.logdir / "metrics.jsonl").open("a") as handle:
                     handle.write(json.dumps(log) + "\n")
-                if self.wandb:
-                    self.wandb.log(log, step=self.step)
-            if cfg.save_interval and self.step % cfg.save_interval == 0:
+            if cfg.save_interval and self.step % cfg.save_interval == 0 and self.step < cfg.max_iters:
                 self.save()
             if (cfg.vis_interval > 0 and self.step % cfg.vis_interval == 0) or self.step in cfg.vis_list:
                 self.validate()
+            for kind, token in self.requests.poll():
+                self.requests.acknowledge(kind, token, self.step, "started")
+                if kind == "save":
+                    path = self.save()
+                else:
+                    self.validate()
+                    path = ""
+                self.requests.acknowledge(kind, token, self.step, "ok", path)
             if cfg.save_artifacts_interval and self.step % cfg.save_artifacts_interval == 0:
                 save_compile_cache(cfg.h3.compile_cache)
             if cfg.gc_interval and self.step % cfg.gc_interval == 0:

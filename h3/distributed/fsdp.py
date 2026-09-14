@@ -15,7 +15,7 @@ def configure_model(model, cfg):
     model.requires_grad_(False)
     for index, block in enumerate(model.transformer_blocks):
         replaced = index % int(cfg.model.ar_interval) == 0
-        block.attn.processor.camera_mode = "matrix" if replaced else "decomposed"
+        block.attn.processor.camera_mode = cfg.model.prope_mode if replaced else cfg.model.mv_prope_mode
         block.attn.processor.fa4 = bool(cfg.model.fa4)
         lr = cfg.ar_lr if replaced else cfg.sa_lr
         if lr:
@@ -23,6 +23,13 @@ def configure_model(model, cfg):
             # gathered forward weights. Small updates never round away in BF16.
             block.attn.float().requires_grad_(True)
     model.worldviews_camera = True
+    model.camera_wrapped = not bool(cfg.model.prope_unwrapped)
+    model.training_attention_block_size = (tuple(cfg.h3.get("training_attention_block_size", (128, 128)))
+                                          if cfg.model.fa4 else (128, 128))
+    model.grouped_attention_backward = bool(cfg.model.fa4 and cfg.h3.get("grouped_attention_backward", False))
+    model.dynamic_grouped_metadata = bool(cfg.h3.get("dynamic_grouped_metadata", False))
+    model.grouped_attention_deterministic = bool(cfg.h3.get("grouped_attention_deterministic", False))
+    model.training_shape_buckets = dict(cfg.h3.get("training_shape_buckets", {}))
     if signature != {name: tuple(p.shape) for name, p in model.named_parameters()}:
         raise AssertionError("The H3 parameter topology changed")
     return signature
@@ -90,9 +97,19 @@ def compile_blocks(model, cfg):
     torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 256)
     torch._dynamo.config.accumulated_recompile_limit = max(torch._dynamo.config.accumulated_recompile_limit, 4096)
     torch._dynamo.config.automatic_dynamic_shapes = False
+    # Preserve native BF16 rounding at casts even when a camera overlay makes
+    # a different fusion graph. Otherwise an identity camera changes the output.
+    if cfg.h3.get("exact_init", False):
+        torch._inductor.config.emulate_precision_casts = True
     model.gradient_checkpointing = False
     model.blocks_checkpointed = bool(cfg.gradient_checkpointing)
     for block in model.transformer_blocks:
+        outside = bool(cfg.h3.get("checkpoint_outside_compile", False))
+        if outside and cfg.attn_block_compile:
+            # FSDP mutates its runtime state. Keep it outside checkpoint HOP
+            # tracing, as in WorldViews, and compile the original block math.
+            target = block.module if isinstance(block, FSDP) else block
+            target.forward = torch.compile(target.forward, dynamic=False)
         original = block.forward
 
         def make_forward(function):
@@ -104,9 +121,8 @@ def compile_blocks(model, cfg):
 
             return forward
 
-        # Checkpoint inside compile, retaining the module tree and state names.
         block.forward = make_forward(original)
-        if cfg.attn_block_compile:
+        if cfg.attn_block_compile and not outside:
             block.forward = torch.compile(block.forward, dynamic=False)
 
 

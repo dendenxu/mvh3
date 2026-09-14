@@ -54,3 +54,31 @@ def test_invalid_focal_fails():
     pose[0, 0, 0] = 0
     with pytest.raises(ValueError, match="focal"):
         precompute_camera(pose)
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_wide_translation_keeps_small_motion_and_breaks_old_period(axis):
+    pose = poses(batch=1, count=5)
+    pose[0, :, 7 + axis] = torch.tensor([0., .01, 2 * torch.pi, 100., 500.])
+    features = torch.ones(1, 5, 1, 128)
+    encoded = apply_camera(features, precompute_camera(pose, pose[:, :1]), torch.arange(5))
+    torch.testing.assert_close(encoded.norm(dim=-1), features.norm(dim=-1), atol=5e-6, rtol=2e-6)
+    # Centimeter motion remains visible, and a full turn of the old integer
+    # frequency bank no longer aliases to the reference camera.
+    for index in range(1, 5):
+        assert (encoded[:, index] - encoded[:, 0]).abs().max() > .1
+    for start, stop in ((0, 16), (48, 64), (96, 128)):
+        assert torch.equal(encoded[..., start:stop], features[..., start:stop])
+
+
+def test_recipe_digest_rejects_old_camera_frequency_bank(monkeypatch):
+    from omegaconf import OmegaConf
+    from h3.modules import camera
+    from utils.config import recipe_digest
+
+    cfg = OmegaConf.create({"h3": {"stage": 1}})
+    current = recipe_digest(cfg)
+    cfg.h3.stage = 2
+    assert recipe_digest(cfg) == current
+    monkeypatch.setattr(camera, "TRANSLATION_FREQUENCIES", (1., 2., 4., 8., 16.))
+    assert recipe_digest(cfg) != current

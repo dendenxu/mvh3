@@ -1,0 +1,10 @@
+parents: [worldviews.yaml]
+# A/B: the same wrapped native layers, with matrix encoding at every frame.
+model:
+  prope_mode: matrix
+  mv_prope_mode: matrix
+  scale_cond: true
+dataset:
+  pose_stable_factors: [0.1, 1.0, 10.0, 100.0, 1000.0]
+val_dataset:
+  pose_stable_factors: [0.1, 1.0, 10.0, 100.0, 1000.0]

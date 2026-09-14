@@ -16,7 +16,9 @@ FROZEN_BASES = {
     int(order): torch.tensor(values, dtype=torch.float32)
     for order, values in json.loads(Path(__file__).with_name("wigner_bases.json").read_text()).items()
 }
-TRANSLATION_FREQUENCIES = (1.0, 2.0, 4.0, 8.0, 16.0)
+# Five log-spaced frequencies retain the historical 12-frequency range in
+# the existing 30 translation channels, without touching native T or the tail.
+TRANSLATION_FREQUENCIES = tuple(0.01 * 3200.0**(index / 4) for index in range(5))
 
 
 @dataclass(frozen=True)
@@ -47,9 +49,10 @@ class MatrixCameraEncoding:
 class CameraBundle:
     decomposed: CameraEncoding
     matrix: MatrixCameraEncoding
+    wrapped: bool = False
 
     def to(self, device, non_blocking=False):
-        return type(self)(self.decomposed.to(device, non_blocking), self.matrix.to(device, non_blocking))
+        return type(self)(self.decomposed.to(device, non_blocking), self.matrix.to(device, non_blocking), self.wrapped)
 
 
 def camera_projection(pose):
@@ -75,7 +78,7 @@ def matrix_rotary(rotary, indices):
     return torch.where(keep, cos, 1.0), torch.where(keep, sin, 0.0)
 
 
-def apply_matrix(features, matrices, indices, head_offset=0, total_heads=None):
+def apply_matrix(features, matrices, indices, head_offset=0, total_heads=None, channel_start=12):
     """Column-vector projection on 20 existing slow H and 20 slow W channels."""
     first, second = features[..., :48].float(), features[..., 48:96].float()
     paired = torch.stack((first, second), dim=-1).unflatten(-2, (3, 16)).flatten(-2)
@@ -89,10 +92,10 @@ def apply_matrix(features, matrices, indices, head_offset=0, total_heads=None):
         matrix = matrix.index_select(2, assigned)
 
     def project(x):
-        points = x[..., 12:].unflatten(-1, (5, 4))
+        points = x[..., channel_start:channel_start + 20].unflatten(-1, (5, 4))
         equation = "bshij,bshpj->bshpi" if per_head else "bsij,bshpj->bshpi"
         projected = torch.einsum(equation, matrix, points).flatten(-2)
-        return torch.cat((x[..., :12], projected), -1)
+        return torch.cat((x[..., :channel_start], projected, x[..., channel_start + 20:]), -1)
 
     paired = torch.stack((t, project(h), project(w)), -2).unflatten(-1, (16, 2)).flatten(-3, -2)
     result = torch.cat((paired[..., 0], paired[..., 1], features[..., 96:].float()), -1).to(features.dtype)
@@ -122,7 +125,7 @@ def wigner_rotation(rotation: torch.Tensor, order: int) -> torch.Tensor:
     raise ValueError(f"Unsupported Wigner order: {order}")
 
 
-def precompute_camera(pose_10d: torch.Tensor) -> CameraEncoding:
+def precompute_camera(pose_10d: torch.Tensor, reference=None) -> CameraEncoding:
     """Compute once per forward from [B, cameras, 10] canonical c2w poses.
 
     Rows are [fx, fy, cx, cy, rotvec(R_c2w), camera_center_world]. Intrinsics
@@ -136,22 +139,47 @@ def precompute_camera(pose_10d: torch.Tensor) -> CameraEncoding:
     with torch.autocast(device_type=pose_10d.device.type, enabled=False):
         pose = pose_10d.float()
         rotation = rotvec_to_matrix(pose[..., 4:7])
+        if reference is not None:
+            reference = reference.float()
+            ref_rotation = rotvec_to_matrix(reference[..., 4:7])
+            rotation = ref_rotation.mT @ rotation
+            # Exact neutral geometry avoids roundoff in R^T R and frozen bases.
+            neutral = (pose == reference).all(-1)
+            rotation = torch.where(neutral[..., None, None], torch.eye(3, device=pose.device), rotation)
+            pose = pose.clone()
+            pose[..., :2] = pose[..., :2] / reference[..., :2]
+            pose[..., 2:4] -= reference[..., 2:4]
+            pose[..., 7:10] = (ref_rotation.mT @ (pose[..., 7:10] - reference[..., 7:10])[..., None]).squeeze(-1)
         frequencies = pose.new_tensor(TRANSLATION_FREQUENCIES)
         translation = pose[..., 7:10, None] * frequencies
         intrinsics = torch.cat((pose[..., :2].log(), pose[..., 2:4]), dim=-1) * 4.0
-        # H: D1(3) + D2(5) + tx(10) + tz{1,4,16}(6) + fx,cx(4).
-        # W: D1(3) + D3(7) + ty(10) + tz{2,8}(4) + fy,cy(4).
+        # H: D1(3) + D2(5) + tx(10) + tz frequency indices {0,2,4}(6) + fx,cx(4).
+        # W: D1(3) + D3(7) + ty(10) + tz frequency indices {1,3}(4) + fy,cy(4).
         h_angles = torch.cat((translation[..., 0, :], translation[..., 2, (0, 2, 4)], intrinsics[..., (0, 2)]), dim=-1)
         w_angles = torch.cat((translation[..., 1, :], translation[..., 2, (1, 3)], intrinsics[..., (1, 3)]), dim=-1)
+        rotation2, rotation3 = wigner_rotation(rotation, 2), wigner_rotation(rotation, 3)
+        if reference is not None:
+            rotation2 = torch.where(neutral[..., None, None], torch.eye(5, device=pose.device), rotation2)
+            rotation3 = torch.where(neutral[..., None, None], torch.eye(7, device=pose.device), rotation3)
         return CameraEncoding(
             rotation,
-            wigner_rotation(rotation, 2),
-            wigner_rotation(rotation, 3),
+            rotation2,
+            rotation3,
             h_angles.cos(),
             h_angles.sin(),
             w_angles.cos(),
             w_angles.sin(),
         )
+
+
+def relative_projection(projection, inverse, reference, reference_inverse):
+    """Anchor joint video/text attention to the conditioning camera, not world origin."""
+    relative = projection @ reference_inverse
+    relative_inverse = reference @ inverse
+    neutral = (projection == reference).all(dim=(-1, -2))
+    identity = torch.eye(4, device=projection.device, dtype=projection.dtype)
+    return MatrixCameraEncoding(torch.where(neutral[..., None, None], identity, relative),
+                                torch.where(neutral[..., None, None], identity, relative_inverse))
 
 
 def apply_camera(features: torch.Tensor, camera: CameraEncoding, camera_indices: torch.Tensor) -> torch.Tensor:

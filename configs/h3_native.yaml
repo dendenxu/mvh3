@@ -1,0 +1,25 @@
+parents: [worldviews.yaml]
+# Released FL2VA inference conventions. See docs/OVERFIT.md for provenance.
+model:
+  timestep_shift: 12.0
+timestep_shift: 12.0
+sampling_solver: h3_euler
+sampling_steps: 50
+vis_sampling_steps: 50
+guidance_scale: 1.0
+cfg_rescale_factor: 0.0
+dataset:
+  model_fps: 24
+  height: 768
+  width: 1344
+val_dataset:
+  model_fps: 24
+  height: 768
+  width: 1344
+h3:
+  text_conditioning: fl2va
+  # The released model has one denoiser. Its training distribution is not
+  # published: this experiment uses uniform u, sigma = 12*u/(1+11*u), plain MSE.
+  noise_sampling: shifted_uniform
+  condition_noise: 0.001
+  condition_encode_seed: 42

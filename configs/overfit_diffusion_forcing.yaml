@@ -1,0 +1,9 @@
+parents: [overfit_sequence.yaml, diffusion_forcing.yaml]
+# Repartition the same complete video on each update. RF is tested separately.
+max_iters: 2048
+save_interval: 256
+auto_resume: true
+resampling_forcing: false
+h3:
+  noise_sampling: shifted_uniform
+  logdir: local/overfit_diffusion_forcing

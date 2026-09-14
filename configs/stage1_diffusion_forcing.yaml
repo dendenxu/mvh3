@@ -1,0 +1,12 @@
+parents: [diffusion_forcing.yaml]
+# Full paired SHORT corpus with the original WorldViews cn2 history noise.
+context_noise: 0.2
+context_noise_std: 0.1
+inference_context_noise: 0.05
+resampling_forcing: false
+h3:
+  stage: 1
+  # Remain in stage 1 for this run; a later curriculum change is explicit.
+  stage1_steps: ${max_iters}
+  grouped_attention_deterministic: true
+  dynamic_grouped_metadata: true

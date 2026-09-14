@@ -1,0 +1,11 @@
+parents: [overfit_paired.yaml]
+ema_weight: 0.995
+ema_cpu_offload: true
+ema_warmup: false
+# One full paired Ours sequence; numerical and batch acceptance are separate.
+h3:
+  grouped_attention_backward: true
+  logdir: local/overfit_sequence_grouped
+overfit:
+  views: [0]
+  generation_interval: 256

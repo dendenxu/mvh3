@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+message=$1
+temporary=$(mktemp "${message}.XXXXXX")
+trap 'rm -f "$temporary"' EXIT HUP INT TERM
+sed 's#https://github.com/dendenxu#git@code.byted.org:zhenxu.zx#g' "$message" > "$temporary"
+cat "$temporary" > "$message"

@@ -1,0 +1,2 @@
+# Compatibility entry for the unified single-sequence chunk recipe.
+parents: [diffusion_forcing.yaml]

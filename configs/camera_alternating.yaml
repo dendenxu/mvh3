@@ -1,0 +1,11 @@
+parents: [worldviews.yaml]
+# A/B: matrix on the trained alternating layers, decomposed on the others.
+# Both streams are wrapped and use each token's actual camera, not frame zero.
+model:
+  prope_mode: matrix
+  mv_prope_mode: decomposed
+  scale_cond: true
+dataset:
+  pose_stable_factors: [0.1, 1.0, 10.0, 100.0, 1000.0]
+val_dataset:
+  pose_stable_factors: [0.1, 1.0, 10.0, 100.0, 1000.0]

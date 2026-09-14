@@ -797,8 +797,8 @@ class AutoencoderKLMiniMaxH3(nn.Module):
         r"""
         Decode a latent video, mirroring the chunking that `_encode` applied.
 
-        `token_drop` removed the tail of every encoded chunk, so consecutive decoded chunks overlap by `frame_overlap`
-        pixel frames and are linearly cross-faded. Latent frames are repeated at the end when the length is not a whole
+        `token_drop` removed the tail of the concatenated encoder output. Consecutive decoder windows overlap by
+        `frame_overlap` pixel frames and are linearly cross-faded. Latent frames are repeated at the end when the length is not a whole
         number of chunks; the extra pixel frames are cut off again at the end.
         """
         # Single-image conditioning/tails can have fewer than one decode chunk.

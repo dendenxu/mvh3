@@ -72,7 +72,7 @@ def test_context_mixing_timestep_and_geometry_match_packed_rows():
     assert torch.all(times[3 + 54:] == 0.7)
     assert inputs["camera_indices"][3:7].tolist() == [0, 1, 2, 3]
     assert inputs["camera_pose"][0, 1, 7] == 1
-    assert int(mask.sum()) == 2 * 23 - 1
+    assert int(mask.sum()) == 2 * 27 - 1
     assert inputs["position_ids"][5, 0] == 3 + 40 / 16
     assert target.shape == inputs["hidden_states"].shape
     clean = torch.ones_like(target[:, 54:])

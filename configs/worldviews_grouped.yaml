@@ -1,0 +1,7 @@
+parents: [worldviews.yaml]
+ema_weight: 0.995
+ema_cpu_offload: true
+ema_warmup: false
+# Retain sparse FA4 forward and use native varlen backward for visibility groups.
+h3:
+  grouped_attention_backward: true

@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from h3.modules.camera import apply_matrix, camera_projection, matrix_rotary
-from utils.config import load_config
+from utils.config import load_config, stage_dataset_config
 from h3.data import temporal_layout
 from h3.distributed.fsdp import configure_model, compile_blocks, parameter_groups
 from utils.h3_wrapper import source_documents
@@ -21,6 +21,22 @@ def recipe():
     cfg.model.fa4 = False
     cfg.attn_block_compile = False
     return cfg
+
+
+def test_paired_presampled_stages_preserve_shapes_and_sampling(monkeypatch):
+    monkeypatch.setenv("MVH3_DATA_ROOT", "/data")
+    monkeypatch.setenv("MVH3_DATA_ROOT3", "/data3")
+    cfg = recipe()
+    short, full = stage_dataset_config(cfg, 1), stage_dataset_config(cfg, 2)
+    assert short.type == full.type == "presampled"
+    assert short.spec.endswith("presampled_200k_short.parquet")
+    assert full.spec.endswith("presampled_200k_embed.parquet")
+    assert short.chunk_text_prob == full.chunk_text_prob == .9
+    assert short.model_fps == full.model_fps == 16
+    assert not short.shape_remap
+    assert dict(full.shape_remap) == {"2x50": "2x45", "4x30": "4x25", "8x15": "6x15", "14x10": "12x10"}
+    assert short.batch_size == full.batch_size == 1
+    assert stage_dataset_config(cfg, 1, True).spec.endswith("presampled_20k_short.parquet")
 
 
 from fixtures_h3 import feature_document
@@ -96,8 +112,8 @@ def test_short_mono_keeps_every_view_and_tail():
                            prompts="caption",
                            pose_stable_factor=1))
     docs = source_documents(sample, 1, 77)
-    assert [len(d["views"][0]["pixels"]) for d in docs] == [77, 4, 77, 4]
-    assert all(len(d["views"]) == 1 and d["isolated"] for d in docs)
+    assert [[len(v["pixels"]) for v in d["views"]] for d in docs] == [[77, 77], [4, 4]]
+    assert all(len(d["views"]) == 2 and d["isolated"] for d in docs)
 
 
 def test_nonuniform_chunks_and_truncated_history():
@@ -151,8 +167,14 @@ def test_complete_objective_updates_existing_weights_and_restores(tmp_path, monk
 
 def test_scale_condition_changes_prediction_without_parameters():
     cfg, model = recipe(), tiny_model()
+    cfg.model.prope_unwrapped = True
+    cfg.model.scale_cond = True
+    cfg.dataset.pose_stable_factors = [1., 10., 100.]
+    cfg.h3.scale_conditioning = "spatial_rotary"
     configure_model(model, cfg)
-    inputs, _, _, _, _ = WorldViewsObjective(cfg).pack(feature_document(), "cpu")
+    document = feature_document()
+    document["views"][0]["scale"] = 10.
+    inputs, _, _, _, _ = WorldViewsObjective(cfg).pack(document, "cpu")
     inputs = dense_inputs(inputs)
     embeddings, rotations = [], []
     time_hook = model.time_embedder.register_forward_hook(lambda module, args, output: embeddings.append(output.clone()))

@@ -8,6 +8,14 @@ def _flex(query, key, value, block_mask, kernel_options=None):
     # Dynamo may fall back after its variant limit; never run quadratic eager flex.
     if not torch.compiler.is_compiling():
         raise RuntimeError("Sparse H3 attention requires compilation; increase the variant limit or fix the graph")
+    if hasattr(block_mask, "h3_visibility_groups"):
+        from h3.modules.grouped_attention import GroupedFlexAttention, MetadataGroupedFlexAttention
+        plan = block_mask.h3_visibility_groups
+        if plan.sizes is not None:
+            return MetadataGroupedFlexAttention.apply(query, key, value, block_mask, plan.query, plan.key,
+                                                       plan.cu_query, plan.cu_key, plan.sizes, plan.deterministic)
+        return GroupedFlexAttention.apply(query, key, value, block_mask, plan.query, plan.key,
+                                           plan.cu_query, plan.cu_key, plan.max_query, plan.max_key, plan.deterministic)
     return flex_attention(query, key, value, block_mask=block_mask, kernel_options=kernel_options)
 
 

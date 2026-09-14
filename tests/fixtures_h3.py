@@ -43,7 +43,7 @@ def feature_document(views=1, frames=22, text_dim=32):
                  valid=timeline.valid,
                  spatial_weights=torch.ones(1, 1),
                  fps=16.,
-                 scale=10.,
+                 scale=1.,
                  prompt="test",
                  text=torch.randn(1, 3, text_dim),
                  source_frames=frames,

@@ -1,0 +1,6 @@
+parents: [h3_native.yaml]
+# Explicit initialization-parity diagnostic, separate from the live WorldViews recipe.
+model:
+  prope_unwrapped: false
+h3:
+  scale_conditioning: camera_geometry

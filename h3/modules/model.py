@@ -23,8 +23,9 @@ from h3.modules.layers import FeedForward, TimestepEmbedding, Timesteps
 from h3.modules.attention import dispatch_attention_fn, compiled_flex_attention
 from h3.utils.model import model_config, get_parameter_dtype, set_gradient_checkpointing
 
-from h3.modules.camera import CameraEncoding, CameraBundle, MatrixCameraEncoding, apply_camera, precompute_camera, camera_projection, matrix_rotary, apply_matrix
+from h3.modules.camera import CameraEncoding, CameraBundle, MatrixCameraEncoding, apply_camera, precompute_camera, camera_projection, matrix_rotary, apply_matrix, relative_projection
 from h3.modules.masking import TokenLayout
+from h3.compile_shapes import pad_camera
 
 # MiniMax-H3 tags every row of the packed sequence with the modality it belongs to and keeps one set of AdaLN
 # modulation parameters per (timestep, modality) pair: 0 = video, 1 = text, 2 = audio.
@@ -194,6 +195,7 @@ class MiniMaxH3AttnProcessor:
             value = all_to_all(value, scatter_dim=2, gather_dim=1)
 
         matrix = None
+        wrapped = isinstance(camera, CameraBundle) and camera.wrapped
         head_offset = 0
         if self.sequence_parallel:
             from utils.distributed import get_sp_rank
@@ -201,7 +203,8 @@ class MiniMaxH3AttnProcessor:
         if isinstance(camera, CameraBundle):
             if self.camera_mode == "matrix":
                 matrix = camera.matrix
-                rotary_emb = matrix_rotary(rotary_emb, camera_indices)
+                if not wrapped:
+                    rotary_emb = matrix_rotary(rotary_emb, camera_indices)
             camera = camera.decomposed if matrix is None else None
 
         if rotary_emb is not None:
@@ -209,10 +212,12 @@ class MiniMaxH3AttnProcessor:
             key = _apply_rotary_emb(key, *rotary_emb)
 
         if matrix is not None:
-            query = apply_matrix(query, matrix.projection.mT, camera_indices, head_offset, attn.heads)
-            key = apply_matrix(key, matrix.inverse, camera_indices, head_offset, attn.heads)
-            value = apply_matrix(_apply_rotary_emb(value, *rotary_emb), matrix.inverse, camera_indices, head_offset,
-                                 attn.heads)
+            start = 0 if wrapped else 12
+            query = apply_matrix(query, matrix.projection.mT, camera_indices, head_offset, attn.heads, start)
+            key = apply_matrix(key, matrix.inverse, camera_indices, head_offset, attn.heads, start)
+            if not wrapped:
+                value = apply_matrix(_apply_rotary_emb(value, *rotary_emb), matrix.inverse, camera_indices, head_offset,
+                                     attn.heads)
 
         if camera is not None:
             query = apply_camera(query, camera, camera_indices)
@@ -242,7 +247,7 @@ class MiniMaxH3AttnProcessor:
                 backend=None if self._attention_backend == "flex" else self._attention_backend,
                 parallel_config=self._parallel_config,
             )
-        if matrix is not None:
+        if matrix is not None and not wrapped:
             hidden_states = apply_matrix(hidden_states, matrix.projection, camera_indices, head_offset, attn.heads)
             hidden_states = _apply_rotary_emb(hidden_states, rotary_emb[0], -rotary_emb[1])
         if self.sequence_parallel:
@@ -605,8 +610,9 @@ class MiniMaxH3Transformer3DModel(nn.Module):
         camera_indices: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
         text_attention_mask: torch.Tensor | None = None,
-        camera_pose_f0: torch.Tensor | None = None,
         camera_projections: tuple[torch.Tensor, torch.Tensor] | None = None,
+        camera_reference: torch.Tensor | None = None,
+        camera_projection_reference: tuple[torch.Tensor, torch.Tensor] | None = None,
         scale_log: torch.Tensor | None = None,
         kv_caches=None,
         update_cache: bool = False,
@@ -643,8 +649,6 @@ class MiniMaxH3Transformer3DModel(nn.Module):
                 Canonical normalized-intrinsic c2w poses, `(batch_size, num_camera_poses, 10)`.
             camera_indices (`torch.Tensor`, *optional*):
                 `(seq_len,)` mapping video tokens to pose rows; text/audio entries must be `-1`.
-            camera_pose_f0 (`torch.Tensor`, *optional*):
-                Per-view first-frame poses, expanded to the same table as `camera_pose`, for decomposed PRoPE.
             camera_projections (`tuple[torch.Tensor, torch.Tensor]`, *optional*):
                 Independently prepared projection/inverse matrices for matrix PRoPE. Each table is
                 `(batch_size, num_camera_poses, 4, 4)` or includes a four-subframe axis before the matrix axes.
@@ -694,15 +698,34 @@ class MiniMaxH3Transformer3DModel(nn.Module):
                 raise ValueError("camera_indices must be on the video device")
             if ((camera_indices < -1) | (camera_indices >= camera_pose.shape[1])).any():
                 raise ValueError("camera_indices contains an invalid pose index")
-            if ((token_tags != 0) & (camera_indices != -1)).any():
+            is_video = torch.zeros_like(token_tags, dtype=torch.bool)
+            is_video[video_indices] = True
+            if ((~is_video) & (camera_indices != -1)).any():
                 raise ValueError("Text and audio tokens must use camera index -1")
-            if ((token_tags == 0) & (camera_indices < 0)).any():
+            if (is_video & (camera_indices < 0)).any():
                 raise ValueError("Every video token needs an aligned camera pose")
-            camera = precompute_camera(camera_pose_f0 if camera_pose_f0 is not None else camera_pose)
-            if getattr(self, "worldviews_camera", False):
+            wrapped = getattr(self, "camera_wrapped", False)
+            if wrapped and (camera_reference is None or camera_projection_reference is None):
+                raise ValueError("Wrapped H3 camera encoding requires a fixed conditioning-camera reference")
+            decomposed_pose = camera_pose
+            neutral = (wrapped and camera_projections is not None
+                       and torch.equal(camera_pose, camera_reference.expand_as(camera_pose))
+                       and torch.equal(decomposed_pose, camera_reference.expand_as(decomposed_pose))
+                       and all(torch.equal(value, reference.expand_as(value))
+                               for value, reference in zip(camera_projections, camera_projection_reference)))
+            if neutral:
+                # An exactly neutral wrapped transform is the identity. Reuse
+                # the native compiled graph so its BF16 fusion/rounding is also
+                # identical, without disabling fusion for moving cameras.
+                camera_indices = None
+            else:
+                camera = precompute_camera(decomposed_pose, camera_reference if wrapped else None)
+            if getattr(self, "worldviews_camera", False) and not neutral:
                 matrix = (MatrixCameraEncoding(
                     *camera_projections) if camera_projections is not None else camera_projection(camera_pose))
-                camera = CameraBundle(camera, matrix)
+                if wrapped:
+                    matrix = relative_projection(matrix.projection, matrix.inverse, *camera_projection_reference)
+                camera = CameraBundle(camera, matrix, wrapped)
 
         layout = attention_mask if isinstance(attention_mask, TokenLayout) else None
         if layout is not None:
@@ -748,12 +771,25 @@ class MiniMaxH3Transformer3DModel(nn.Module):
             hidden_states = scatter_forward(hidden_states, dim=1)
             adaln_indices = scatter_forward(adaln_indices, dim=0)
 
+        if torch.is_grad_enabled():
+            camera = pad_camera(camera, getattr(self, "training_shape_buckets", {}).get("cameras", 0))
         local_inputs = {}
+        # Keep inference's native block representation; this only selects the
+        # original FA4 backward tile used by gradient-enabled training.
+        block_size = getattr(self, "training_attention_block_size", (128, 128)) if torch.is_grad_enabled() else (128, 128)
+        grouped_plan = None
+        if layout is not None and torch.is_grad_enabled() and getattr(self, "grouped_attention_backward", False):
+            from h3.modules.grouped_attention import visibility_groups
+            grouped_plan = visibility_groups(layout)
         for block_index, block in enumerate(self.transformer_blocks):
             # CPU-offloaded FSDP parameters are resident on CPU between calls.
             block_device = hidden_states.device if sequence_parallel else next(block.parameters()).device
             if block_device not in local_inputs:
-                mask = layout.to(block_device).block_mask() if layout is not None else attention_mask
+                mask = layout.to(block_device).block_mask(block_size=block_size) if layout is not None else attention_mask
+                if grouped_plan is not None:
+                    mask.h3_visibility_groups = grouped_plan.to(
+                        block_device, getattr(self, "dynamic_grouped_metadata", False),
+                        getattr(self, "grouped_attention_deterministic", False))
                 if mask is not None and layout is None:
                     mask = mask.to(block_device)
                 local_inputs[block_device] = (

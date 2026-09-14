@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from scipy.spatial.transform import Rotation
 
 from h3.data import temporal_layout, pad_video
+from utils.camera import prepare_camera_geometry
 
 
 def raw_collate(samples):
@@ -69,6 +70,11 @@ def extract_views(sample):
                  scale=float(scale),
                  source_view=view,
                  source_start=0,
+                 caption_scene=(cpu['caption_scene'][view] if as_batch else cpu['caption_scene'])
+                 if 'caption_scene' in cpu else None,
+                 caption_motions=(cpu['caption_motions'][view] if as_batch else cpu['caption_motions'])
+                 if 'caption_motions' in cpu else None,
+                 caption_source_frames=cpu.get('caption_source_frames', len(pixels)),
                  chunk_prompts=(cpu["chunk_prompts"][view] if as_batch else cpu["chunk_prompts"])
                  if cpu.get("chunk_prompts") else None))
     return result
@@ -83,8 +89,13 @@ def source_documents(sample, stage, short_frames=77):
                  source=sample["cpu"].get("parquet", ""))
         ]
     documents = []
-    for view in views:
-        for start in range(0, len(view["pixels"]), short_frames):
+    # Shorten time without turning a source's view batch into separate updates.
+    # The packed mask keeps each view independent, including its own image/text.
+    for start in range(0, max(len(view["pixels"]) for view in views), short_frames):
+        clips = []
+        for view in views:
+            if start >= len(view["pixels"]):
+                continue
             stop = min(start + short_frames, len(view["pixels"]))
             clip = {
                 **view,
@@ -93,7 +104,8 @@ def source_documents(sample, stage, short_frames=77):
                     for key in ("pixels", "pose", "projection", "inverse")
                 }, "source_start": start
             }
-            documents.append(dict(views=[clip], isolated=True, source=sample["cpu"].get("parquet", "")))
+            clips.append(clip)
+        documents.append(dict(views=clips, isolated=True, source=sample["cpu"].get("parquet", "")))
     return documents
 
 
@@ -135,7 +147,7 @@ class VideoEncoder:
         self.pixel_std = torch.tensor([.229, .224, .225], device=device).reshape(1, 3, 1, 1, 1)
 
     @torch.no_grad()
-    def encode(self, pixels):
+    def encode(self, pixels, generator=None):
         layout = temporal_layout(len(pixels))
         h, w = pixels.shape[-2:]
         video = pixels.permute(1, 0, 2, 3)[None].to(self.device)
@@ -143,7 +155,7 @@ class VideoEncoder:
         # or encode a spatial seam between unrelated views.
         video = F.pad(video, (0, (-w) % 32, 0, (-h) % 32, 0, 0), mode="replicate")
         video = (pad_video(video, layout) - self.pixel_mean) / self.pixel_std
-        latent = self.model.encode(video).latent_dist.sample().half().float()
+        latent = self.model.encode(video).latent_dist.sample(generator=generator).half().float()
         latent = (latent - self.mean) / self.std
         if latent.shape[2] != len(layout.valid):
             raise ValueError("H3 VAE temporal geometry changed")
@@ -160,6 +172,7 @@ class VideoEncoder:
         return pixels[0, :, :frames, :height, :width].permute(1, 0, 2, 3).clamp(0, 1).cpu()
 
     def prepare(self, document, cfg, validation=False):
+        document = prepare_camera_geometry(document, cfg)
         lengths = sample_condition_lengths(document["views"], cfg, validation)
         if document["isolated"] and len(lengths) > 1:
             # Every independent video keeps its own condition image.
@@ -176,7 +189,10 @@ class VideoEncoder:
             latent, layout, weights = self.encode(view["pixels"])
             condition = None
             if cond_frames:
-                cond, cond_layout, _ = self.encode(view["pixels"][:cond_frames])
+                seed = cfg.h3.get("condition_encode_seed")
+                # Native H3 draws posterior noise on CPU, even for a CUDA VAE.
+                generator = torch.Generator(device="cpu").manual_seed(seed) if seed is not None else None
+                cond, cond_layout, _ = self.encode(view["pixels"][:cond_frames], generator=generator)
                 condition = dict(latent=cond,
                                  frames=cond_layout.rotary_frames,
                                  valid=cond_layout.valid,
@@ -189,17 +205,22 @@ class VideoEncoder:
                      projection=projections(view, layout, "projection"),
                      inverse=projections(view, layout, "inverse"),
                      condition=condition,
+                     condition_image=view["pixels"][0].mul(255).round().byte().cpu() if cond_frames else None,
                      frames=layout.rotary_frames,
                      valid=layout.valid,
                      spatial_weights=weights,
                      fps=view["fps"],
                      scale=view["scale"],
+                     source_pose_stable_factor=view.get("source_pose_stable_factor", view["scale"]),
                      prompt=view["prompt"],
                      height=view["pixels"].shape[-2],
                      width=view["pixels"].shape[-1],
                      source_frames=len(view["pixels"]),
                      source_view=view["source_view"],
                      source_start=view["source_start"],
+                     caption_scene=view.get("caption_scene"),
+                     caption_motions=view.get("caption_motions"),
+                     caption_source_frames=view.get("caption_source_frames", len(view["pixels"])),
                      chunk_prompts=view.get("chunk_prompts")))
         return {**document, "views": encoded}
 
@@ -228,6 +249,110 @@ class TextEncoder:
                         fingerprint.update(path.read_bytes())
         self.identity = fingerprint.hexdigest()
 
+    def ensure_encoder(self):
+        if self.encoder is None:
+            encoder = self.model_class.from_pretrained(Path(self.cfg.h3.checkpoint) / "text_encoder",
+                                                       torch_dtype=torch.bfloat16, local_files_only=True,
+                                                       attn_implementation="sdpa").model
+            encoder.eval().requires_grad_(False)
+            self.encoder = self.wrap(encoder) if self.wrap is not None else encoder.to(self.device)
+            if self.cfg.text_encoder_compile:
+                self.encoder = torch.compile(self.encoder)
+
+    @torch.no_grad()
+    def i2v(self, requests):
+        """Native FL2VA picture labels/vision tags and complete Qwen layer-50 features.
+
+        Deduplicate shared image/caption conditions before the Qwen forward.
+        All ranks still participate when any rank misses its local cache.
+        """
+        import torch.distributed as dist
+        from transformers import Qwen3VLProcessor
+        from PIL import Image
+        if not hasattr(self, "processor"):
+            self.processor = Qwen3VLProcessor.from_pretrained(Path(self.cfg.h3.checkpoint) / "processor",
+                                                             local_files_only=True)
+        paths = []
+        for caption, images in requests:
+            digest = hashlib.sha256((self.identity + "FL2VA-pictures-v1\0" + caption).encode())
+            for img in images:
+                digest.update(str(tuple(img.shape)).encode())
+                digest.update(img.contiguous().numpy().tobytes())
+            paths.append(self.cache / (digest.hexdigest() + ".pt"))
+        if not paths:
+            raise ValueError("Distributed image/text encoding needs at least one local request")
+        unique = {}
+        for index, path in enumerate(paths):
+            unique.setdefault(path, index)
+        cached = {}
+        for path in unique:
+            try:
+                value = torch.load(path, map_location="cpu", weights_only=True)
+                if value["identity"] != self.identity or value.get("format") != "fl2va-i2v-v1":
+                    raise ValueError("Incompatible native image/text cache")
+                cached[path] = value
+            except (FileNotFoundError, OSError):
+                cached[path] = None
+        needed = [path for path, value in cached.items() if value is None]
+        missing = torch.tensor(int(bool(needed)), device=self.device)
+        if dist.is_initialized():
+            dist.all_reduce(missing, op=dist.ReduceOp.MAX)
+        if missing.item():
+            # A cache-hit rank performs one matching collective sequence while
+            # another rank encodes; its existing cache record stays unchanged.
+            active_paths = needed or [next(iter(unique))]
+            active_requests = [requests[unique[path]] for path in active_paths]
+            images = [Image.fromarray(img.permute(1, 2, 0).numpy()) for _, imgs in active_requests for img in imgs]
+            has_images = torch.tensor(int(bool(images)), device=self.device)
+            if dist.is_initialized():
+                dist.all_reduce(has_images, op=dist.ReduceOp.MIN)
+            if not has_images.item():
+                raise ValueError("Native distributed i2v requires an image on every rank; use text-only encoding for t2v")
+            vision = self.processor.image_processor(images=images, return_tensors="pt")
+            sequences, tags, offset = [], [], 0
+            for caption, imgs in active_requests:
+                ids, types = [], []
+                for index in range(len(imgs)):
+                    count = int(vision["image_grid_thw"][offset].prod()) // self.processor.image_processor.merge_size**2
+                    label = self.tokenizer(f"<Picture {index + 1}>: ", add_special_tokens=False)["input_ids"]
+                    visual = ([self.tokenizer.convert_tokens_to_ids("<|vision_start|>")]
+                              + [self.tokenizer.convert_tokens_to_ids("<|image_pad|>")] * count
+                              + [self.tokenizer.convert_tokens_to_ids("<|vision_end|>")])
+                    ids += label + visual
+                    types += [1] * len(label) + [0] * len(visual)
+                    offset += 1
+                prompt_ids = self.tokenizer(caption, add_special_tokens=False)["input_ids"]
+                ids += prompt_ids
+                types += [1] * len(prompt_ids)
+                sequences.append(ids)
+                tags.append(torch.tensor(types, dtype=torch.long))
+            tokens = self.tokenizer.pad({"input_ids": sequences}, padding=True, return_tensors="pt").to(self.device)
+            mm = torch.tensor(self.processor.create_mm_token_type_ids(tokens.input_ids.tolist()), device=self.device)
+            self.ensure_encoder()
+            output = self.encoder(**tokens, mm_token_type_ids=mm, use_cache=False, output_hidden_states=True,
+                                  pixel_values=vision["pixel_values"].to(self.device, torch.bfloat16),
+                                  image_grid_thw=vision["image_grid_thw"].to(self.device))
+            owners = [list(map(str, needed))]
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            if dist.is_initialized():
+                owners = [None] * dist.get_world_size()
+                dist.all_gather_object(owners, list(map(str, needed)))
+            for index, path in enumerate(active_paths):
+                if cached[path] is not None:
+                    continue
+                value = output.hidden_states[50][index:index + 1, :len(sequences[index])].detach().cpu().contiguous()
+                record = dict(identity=self.identity, features=value, tags=tags[index], format="fl2va-i2v-v1")
+                cached[path] = record
+                # One publisher per shared key. Return computed values directly:
+                # shared storage can lag immediately after an atomic rename.
+                if not any(str(path) in names for names in owners[:rank]):
+                    temporary = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+                    torch.save(record, temporary)
+                    os.replace(temporary, path)
+        self.last_i2v_stats = dict(requests=len(paths), unique_requests=len(unique), cache_misses=len(needed),
+                                  encoded_requests=len(active_paths) if missing.item() else 0)
+        return [cached[path] for path in paths]
+
     def cache_path(self, text):
         key = hashlib.sha256((self.identity + str(self.cfg.h3.text_max_length) + "\0" + text).encode()).hexdigest()
         return self.cache / (key + ".pt")
@@ -240,15 +365,7 @@ class TextEncoder:
         if dist.is_initialized():
             dist.all_reduce(missing, op=dist.ReduceOp.MAX)
         if missing.item():
-            if self.encoder is None:
-                encoder = self.model_class.from_pretrained(Path(self.cfg.h3.checkpoint) / "text_encoder",
-                                                           torch_dtype=torch.bfloat16,
-                                                           local_files_only=True,
-                                                           attn_implementation="sdpa").model
-                encoder.eval().requires_grad_(False)
-                self.encoder = self.wrap(encoder) if self.wrap is not None else encoder.to(self.device)
-                if self.cfg.text_encoder_compile:
-                    self.encoder = torch.compile(self.encoder)
+            self.ensure_encoder()
             tokens = self.tokenizer(texts,
                                     add_special_tokens=False,
                                     padding=True,

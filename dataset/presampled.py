@@ -153,6 +153,8 @@ class PresampledDataset(Dataset):
                  num_workers: int = 1, **kwargs):
         self.spec = spec
         self.config = config
+        self.native_h3_text = bool(config is not None and config.get('h3', {}).get('text_conditioning') == 'fl2va')
+        self.h3_single_sequence = bool(config is not None and config.get('h3', {}).get('single_sequence', False))
         self.height = int(height)
         self.width = int(width)
         self.model_fps = int(model_fps)
@@ -561,6 +563,12 @@ class PresampledDataset(Dataset):
         cpu['prompts'] = list(r['caption'])[:mv] if view_iso else r['caption'][0]
         cpu['video_path'] = r['video_path'][0]
         cpu['rows'] = np.asarray(r['row'], dtype=np.int64)[:mv]
+        cpu['parquet'] = self.spec
+        cpu['presampled_row'] = int(gi)
+        cpu['source_parquets'] = list(r['data_parquet'])[:mv]
+        cpu['source_view_ids'] = list(r['view_ids'])[:mv]
+        cpu['start_frames'] = np.asarray(r['frame_start'], dtype=np.int64)[:mv]
+        cpu['end_frames'] = np.asarray(r['frame_end'], dtype=np.int64)[:mv]
         # view_as_batch folds mv→batch, so each batch row is ONE full-resolution view: emit a
         # mv=1 single-tile pack (NOT the mv-strip used to lay out the canvas). Otherwise
         # prepare_pack/unpack_encode_pack would slice mv strip tiles (x=0,W,2W,…) from a single
@@ -582,7 +590,18 @@ class PresampledDataset(Dataset):
         # vis 'C{k}' lines would out-count the fed chunk embeds.
         cap = lambda cl: cl[:max(1, len(cl) * gen // gen_full)]
         use_chunk = False
-        if self.has_embeds:
+        if self.native_h3_text and self.h3_single_sequence:
+            # SHORT rows already contain sliced motions. Never fall back to the
+            # unchanged parent motion narrative, including after a shape remap.
+            text_views = mv if view_iso else 1
+            scenes = [str(r['scene'][v] or '') for v in range(text_views)]
+            motions = [list(r['chunks'][v] or []) for v in range(text_views)]
+            cpu['caption_scene'] = scenes if view_iso else scenes[0]
+            cpu['caption_motions'] = motions if view_iso else motions[0]
+            cpu['caption_source_frames'] = gen_full * 4 - 3
+            cpu['prompts'] = scenes if view_iso else scenes[0]
+            use_chunk = True
+        elif self.has_embeds:
             is_static = all(bool(s) for s in r['static'])
             glob = r.get('prompt_embeds'); chk = r.get('chunk_prompt_embeds')
             text_views = mv if view_iso else 1
@@ -600,15 +619,16 @@ class PresampledDataset(Dataset):
             use_chunk = has_chunk and ((not has_global) or (
                 (not is_static) and self.chunk_text_prob > 0 and random.random() < self.chunk_text_prob))
             if use_chunk:
-                batch['prompt_embeds'] = (
-                    torch.stack([self.load_chunk_embeds(chunk_paths[v]) for v in range(mv)])
-                    if view_iso else self.load_chunk_embeds(chunk_paths[0]))  # [mv,nc,L,D] | [nc,L,D]
+                if not self.native_h3_text:
+                    batch['prompt_embeds'] = (
+                        torch.stack([self.load_chunk_embeds(chunk_paths[v]) for v in range(mv)])
+                        if view_iso else self.load_chunk_embeds(chunk_paths[0]))
                 cpu['per_chunk_text'] = True
                 # Preserve the selected caption policy while replacing T5 caches.
-                raw_chunks = [[f"{r['scene'][v]} [CHUNK] {caption}" for caption in cap(list(r['chunks'][v] or []))]
+                raw_chunks = [[f"{r['scene'][v]}\n[CHUNK]{caption}" for caption in cap(list(r['chunks'][v] or []))]
                               for v in range(text_views)]
                 cpu['chunk_prompts'] = raw_chunks if view_iso else raw_chunks[0]
-            else:
+            elif not self.native_h3_text:
                 batch['prompt_embeds'] = (
                     torch.stack([self.load_embed(r['prompt_embeds'][v]) for v in range(mv)])
                     if view_iso else self.load_embed(r['prompt_embeds'][0]))                # [mv,L,D] | [L,D]

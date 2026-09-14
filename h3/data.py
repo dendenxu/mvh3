@@ -8,8 +8,26 @@ import numpy as np
 import torch
 
 
+def spatial_rotary_grid(height, width):
+    area = (height * width)**.5
+    yy = torch.from_numpy(np.linspace((1 - height / area) / 2, (1 + height / area) / 2, height // 2, endpoint=False) * 32)
+    xx = torch.from_numpy(np.linspace((1 - width / area) / 2, (1 + width / area) / 2, width // 2, endpoint=False) * 32)
+    return torch.stack(torch.meshgrid(yy, xx, indexing="ij"), -1).flatten(0, 1)
+
+
+def temporal_rotary_clock(latents, fps):
+    spans = torch.tensor([(40 / fps) * (1, 4, 4, 4, 4)[i % 5] for i in range(latents)], dtype=torch.float64)
+    return torch.cat((torch.zeros(1, dtype=torch.float64), spans[:-1].cumsum(0)))
+
+
 @dataclass(frozen=True)
 class TemporalLayout:
+    """`valid` marks requested intervals, not VAE/attention padding to discard.
+
+    Every latent is needed by the non-causal decoder, including the encoded
+    repeated-frame tail. Generate and supervise the complete aligned sequence.
+    """
+
     source_frames: int
     padded_frames: int
     camera_frames: torch.Tensor
@@ -33,7 +51,7 @@ def temporal_layout(num_frames: int) -> TemporalLayout:
     ids = torch.arange(latents)
     anchors = 17 * (ids // 5) + 4 * (ids % 5)
     starts = 17 * (ids // 5) + torch.tensor([0, 1, 5, 9, 13])[ids % 5]
-    # Include a partial final interval; its camera is anchored to the last real frame.
+    # Use this only for requested duration/chunk boundaries, never attention/loss.
     valid = starts < num_frames
     return TemporalLayout(num_frames, padded_frames, anchors.clamp_max(num_frames - 1), starts.double(), valid)
 

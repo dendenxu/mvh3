@@ -37,6 +37,10 @@ def write_visualization(outputs, document, video, cfg, step, rank, index=0, stag
         frames = torch.cat(panels, -1).permute(0, 2, 3, 1).mul(255).byte().numpy()
         write_video(str(directory / f"view{view_index:03d}.mp4"), frames, fps=view["fps"])
         meta = {key: value for key, value in view.items() if isinstance(value, (str, float, int))}
+        if "generation_chunks" in view:
+            meta["generation_chunks"] = view["generation_chunks"].tolist()
+        if "caption_specs" in view:
+            meta["caption_specs"] = view["caption_specs"]
         meta.update(step=step, source=document["source"], stage=cfg.h3.stage if stage is None else stage)
         (directory / f"view{view_index:03d}.json").write_text(json.dumps(meta, indent=2) + "\n")
         if cfg.decode_offload:

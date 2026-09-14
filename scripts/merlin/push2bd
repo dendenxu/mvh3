@@ -1,0 +1,45 @@
+#!/bin/bash
+# Mirror the committed tree, keeping ByteDance's independent snapshot history.
+set -euo pipefail
+
+push_options=()
+if [[ ${1:-} == --dry-run && $# == 1 ]]; then
+    push_options+=(--dry-run)
+elif [[ $# != 0 ]]; then
+    echo 'Usage: push2bd [--dry-run]' >&2
+    exit 2
+fi
+
+source_repo=$(git rev-parse --show-toplevel)
+source_commit=$(git rev-parse HEAD)
+mirror=${MVH3_MIRROR_DIR:-$HOME/.gitlab/mvh3.git}
+remote=git@code.byted.org:zhenxu.zx/mvh3.git
+mkdir -p "$(dirname "$mirror")"
+exec 9>"${mirror}.lock"
+flock -x 9
+if [[ ! -d $mirror ]]; then
+    git init --quiet --bare "$mirror"
+    git --git-dir="$mirror" remote add origin "$remote"
+fi
+if [[ $(git --git-dir="$mirror" config --get remote.origin.url) != "$remote" ]]; then
+    echo "Refusing to use a mirror with a different origin: $mirror" >&2
+    exit 1
+fi
+
+git --git-dir="$mirror" fetch --quiet --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+git --git-dir="$mirror" fetch --quiet --no-tags "$source_repo" "$source_commit"
+tree=$(git --git-dir="$mirror" rev-parse "$source_commit^{tree}")
+parents=()
+if parent=$(git --git-dir="$mirror" rev-parse --verify refs/remotes/origin/main 2>/dev/null); then
+    if [[ $(git --git-dir="$mirror" rev-parse "$parent^{tree}") == "$tree" ]]; then
+        echo 'ByteDance mvh3/main already matches the committed tree.'
+        exit 0
+    fi
+    parents=(-p "$parent")
+fi
+
+name=$(git config user.name)
+email=$(git config user.email)
+snapshot=$(git log -1 --format=%B "$source_commit" |
+    git --git-dir="$mirror" -c user.name="$name" -c user.email="$email" commit-tree "$tree" "${parents[@]}")
+git --git-dir="$mirror" push "${push_options[@]}" origin "$snapshot:refs/heads/main"

@@ -1,0 +1,31 @@
+# Data-only import of WorldGen pre200.yaml and pre200_short.yaml.
+# Keep the paired pixels, cameras, captions, shape remaps and true sampled FPS.
+dataset:
+  type: presampled
+  spec: ${oc.env:MVH3_DATA_ROOT}/captions/presampled_200k_embed.parquet
+  chunk_text_prob: 0.9
+  shape_remap: &id001
+    2x50: 2x45
+    4x30: 4x25
+    8x15: 6x15
+    14x10: 12x10
+  model_fps: 16
+val_dataset:
+  type: presampled
+  spec: ${oc.env:MVH3_DATA_ROOT}/captions/presampled_20k_embed.parquet
+  chunk_text_prob: 0.9
+  shape_remap: *id001
+  model_fps: 16
+h3:
+  stage1_dataset:
+    type: presampled
+    spec: ${oc.env:MVH3_DATA_ROOT}/captions/presampled_200k_short.parquet
+    chunk_text_prob: 0.9
+    shape_remap: &id002 {}
+    model_fps: 16
+  stage1_val_dataset:
+    type: presampled
+    spec: ${oc.env:MVH3_DATA_ROOT}/captions/presampled_20k_short.parquet
+    chunk_text_prob: 0.9
+    shape_remap: *id002
+    model_fps: 16

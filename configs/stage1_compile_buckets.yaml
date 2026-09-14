@@ -1,0 +1,10 @@
+parents: [stage1_diffusion_forcing.yaml]
+# Candidate for bounded verification before restoring the paused HR run.
+# Pad only unused rows; keep every original sample, caption and chunk.
+h3:
+  checkpoint_outside_compile: true
+  training_shape_buckets:
+    tokens: 2048
+    timesteps: 16
+    cameras: 32
+    chunks: 16

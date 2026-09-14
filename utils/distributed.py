@@ -69,7 +69,9 @@ def gather_mixed_batch(local_batch):
         for i, (shape, dtype_str) in enumerate(metas[src]):
             dtype = _dtype_map[dtype_str]
             if sp_rank == src:
-                t = local_tensors[i]
+                # VAE latents and matrix inverses may retain nonstandard
+                # strides; NCCL broadcast requires contiguous source storage.
+                t = local_tensors[i].contiguous()
                 t = t.cuda() if t.device.type == 'cpu' else t
             else:
                 t = torch.empty(shape, dtype=dtype, device='cuda')

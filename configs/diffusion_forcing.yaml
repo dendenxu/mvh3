@@ -1,0 +1,14 @@
+parents: [worldviews_grouped.yaml]
+h3:
+  single_sequence: true
+  chunk_size_range: [3, 20]
+  clean_prefix_probability: 0.5
+  # Include a motion description only when this BD block covers over half
+  # of its original caption window. Keep ordinary prose without numbering.
+  caption_overlap_threshold: 0.5
+context_noise: 0.0
+context_noise_std: 0.0
+inference_context_noise: 0.0
+# The sampled cut defines GT history. Retaining the TF forced-GT block here
+# would overwrite the first RF prediction when the initial cut is zero.
+resampling_forcing_clean_chunks: 0
