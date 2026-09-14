@@ -30,6 +30,7 @@ mvh3_run="${MVH3_RUN_DIR:-local/production64_${ARNOLD_MONITOR_TRIAL_ID}}"
 mvh3_config="${MVH3_TRAIN_CONFIG:-configs/diffusion_forcing.yaml}"
 "$mvh3_python" -m scripts.environment_report \
   --reference "${MVH3_FA4_REFERENCE:-local/attention_native_reference_v2/fa4_source_receipt.json}" \
+  --checkpoint "$MVH3_CHECKPOINT" \
   --output "$mvh3_run/runtime_node${ARNOLD_ID}.json"
 
 exec "$mvh3_python" -m torch.distributed.run \

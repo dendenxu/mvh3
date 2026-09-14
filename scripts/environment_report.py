@@ -1,24 +1,30 @@
-"""Record the worker runtime and compare its installed FA4 sources."""
+"""Check worker dependencies and installed FA4 sources before loading weights."""
 
 import sys
+import json
+import socket
+import hashlib
+import argparse
 from pathlib import Path
+from importlib import metadata
+
+import torch
+import wandb
+import flash_attn
+from transformers import Qwen3VLProcessor
 
 
 def record_environment():
-    """Check the existing FA4/Tracking runtime before starting all ranks."""
-    import json
-    import socket
-    import hashlib
-    import argparse
-    from importlib import metadata
-
-    import torch
-    import flash_attn
-
+    """Check the original runtime and construct the actual i2v processor once."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path, required=True)
     args = parser.parse_args()
+
+    # Processor construction resolves indirect tokenizer dependencies that a
+    # plain Transformers import misses. Fail before loading the 33B model.
+    processor = Qwen3VLProcessor.from_pretrained(args.checkpoint / "processor", local_files_only=True)
     reference = json.loads(args.reference.read_text())
     root = Path(flash_attn.__file__).resolve().parent.parent
     mismatches = [
@@ -27,8 +33,6 @@ def record_environment():
         if not (root / entry["path"]).is_file()
         or hashlib.sha256((root / entry["path"]).read_bytes()).hexdigest() != entry["sha256"]
     ]
-    import wandb
-
     report = dict(
         host=socket.gethostname(),
         python=sys.executable,
@@ -36,6 +40,8 @@ def record_environment():
         fa4_source_files=len(reference["files"]),
         fa4_mismatches=mismatches,
         byted_wandb=metadata.version("byted-wandb"),
+        pycountry=metadata.version("pycountry"),
+        i2v_processor=type(processor).__name__,
         internal_tracking=bool(getattr(wandb, "_IS_TRACKING", False)),
         cuda_devices=torch.cuda.device_count(),
     )
