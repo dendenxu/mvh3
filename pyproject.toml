@@ -30,6 +30,7 @@ train = [
     "torch>=2.12",
     "transformers>=5.9.0",
     "accelerate>=1.2.1",
+    "pycountry",
     "numpy>=1.26", "scipy>=1.10", "pyarrow>=17",
     "opencv-python-headless>=4.10", "pillow", "av", "torchcodec",
     "matplotlib", "rich", "tqdm", "byted-wandb",
