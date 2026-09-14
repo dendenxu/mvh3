@@ -84,7 +84,7 @@ class DiffusionTrainer:
         set_seed(cfg.seed + groups.get_rank() + self.step)
         self.video = VideoEncoder(cfg.h3.vae, self.device, cfg.vae_compile)
         self.text = TextEncoder(cfg, wrap=partial(wrap_text, cfg=cfg), device=self.device)
-        self.data_loader = BatchLoader(cfg, self.video, self.text, self.step)
+        self.data_loader = BatchLoader(cfg, self.video, self.text)
         if restored:
             self.data_loader.load_state_dict(restored["runtime"]["stream"])
             restore_rng(restored["rng"])
@@ -137,18 +137,32 @@ class DiffusionTrainer:
                 self.seen_shapes.add(shape)
             log = self.train_step(document, override)
 
-            # A peer can keep compiling while rank zero reuses a warm graph.
+            # A peer may compile, decode or process a larger sample while rank
+            # zero is already waiting. Record replica bounds in the same reduce.
             total_graphs = torch._dynamo.utils.counters["stats"]["unique_graphs"]
-            compile_counts = torch.tensor([total_graphs - previous_graphs, total_graphs], device=self.device)
-            dist.all_reduce(compile_counts, op=dist.ReduceOp.MAX)
+            replica_metrics = dict(
+                new_compile_graphs=total_graphs - previous_graphs,
+                compile_graphs_total=total_graphs,
+                max_tokens=log["tokens"],
+                negative_min_tokens=-log["tokens"],
+                max_data_seconds=timings["data_seconds"],
+                max_forward_seconds=log["forward_seconds"],
+                max_backward_compute_seconds=log["backward_compute_seconds"],
+                max_gradient_clip_seconds=log["gradient_clip_seconds"],
+            )
+            values = torch.tensor(list(replica_metrics.values()), device=self.device, dtype=torch.float64)
+            dist.all_reduce(values, op=dist.ReduceOp.MAX)
+            replica_metrics = dict(zip(replica_metrics, values.tolist()))
+            replica_metrics["min_tokens"] = -replica_metrics.pop("negative_min_tokens")
+            for name in ("new_compile_graphs", "compile_graphs_total", "min_tokens", "max_tokens"):
+                replica_metrics[name] = int(replica_metrics[name])
             self.step += 1
             log.update(timings)
+            log.update(replica_metrics)
             log.update(
                 step=self.step,
                 stage=self.stage,
                 resampling_forcing_depth=self.resampling_forcing_depth,
-                new_compile_graphs=int(compile_counts[0]),
-                compile_graphs_total=int(compile_counts[1]),
                 seconds=time.monotonic() - started,
                 self=int(override is not None),
             )

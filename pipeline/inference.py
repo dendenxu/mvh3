@@ -8,6 +8,7 @@ from functools import partial
 import torch
 from omegaconf import OmegaConf
 
+from utils.random import set_seed
 from utils.tracking import Tracker
 from utils.video import write_video
 from utils import distributed as groups
@@ -51,6 +52,7 @@ def run_inference(
     groups.launch_distributed_job(sp_size_arg=cfg.sp_size, fs_size_arg=cfg.fs_size)
     device = torch.device("cuda", torch.cuda.current_device())
     torch.set_num_threads(1)
+    set_seed(seed)
     output.mkdir(parents=True, exist_ok=True)
     if groups.get_rank() == 0:
         OmegaConf.save(cfg, output / "resolved.yaml")
@@ -99,7 +101,7 @@ def run_inference(
             checkpoint_step = 0
         compile_blocks(model.module, cfg)
         for case, (request_path, request, document, encode_seconds) in enumerate(prepared):
-            torch.manual_seed(seed)
+            set_seed(seed)
             started = time.monotonic()
             torch.cuda.reset_peak_memory_stats()
             parity = []

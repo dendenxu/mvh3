@@ -152,8 +152,11 @@ node logs when diagnosing throughput.
 Checkpoints contain raw trainable shards, AdamW, fixed EMA 0.995, RNG, the global
 step, source queues and pending resampling forcing state. Frozen weights load from original H3.
 The manifest becomes visible after all shards complete. Resume requires the same
-recipe and SP/FSDP topology. DataLoader worker prefetch state is not serialized,
-so future sample replay across processes is not guaranteed.
+recipe and SP/FSDP topology. The source sampler saves its unused random draws and
+issued-but-unconsumed indices. New workers replay those indices; source datasets
+seed augmentation from each index. Source decoding and worker initialization do
+not consume the model's RNG. Legacy checkpoints without a source cursor restore
+weights and queued documents, but report that future source replay is unavailable.
 
 Validation defaults to EMA when enabled, then restores raw optimizer weights.
 Standalone inference selects `--weights auto|raw|ema`. Byted-wandb records code,

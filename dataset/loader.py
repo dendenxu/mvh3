@@ -1,6 +1,7 @@
 """Load, encode and distribute the original WorldViews source batches."""
 
 import time
+import warnings
 from collections import deque
 from functools import partial
 
@@ -14,6 +15,7 @@ from utils.captions import caption_specs
 from model.chunks import prepare_chunk_plan
 from utils.config import stage_dataset_config
 from dataset.mvgame import cycle, worker_init_fn
+from utils.checkpoint import rng_state, restore_rng
 
 
 class BatchLoader:
@@ -24,7 +26,7 @@ class BatchLoader:
     A document keeps all its views together, preserving the source batch size.
     """
 
-    def __init__(self, cfg, video, text, step=0, validation=False):
+    def __init__(self, cfg, video, text, validation=False):
         self.cfg = cfg
         self.video = video
         self.text = text
@@ -33,25 +35,22 @@ class BatchLoader:
         self.pending = deque()
         self.mixed = deque()
         self.negative = None
-        self.loader_step = step
-        seed = cfg.seed if validation else cfg.seed + groups.get_rank() + step
+        seed = cfg.seed if validation else cfg.seed + groups.get_rank()
         self.sampler_generator = torch.Generator().manual_seed(seed)
         self.build_loader(self.stage)
 
     def build_loader(self, stage):
         cfg = self.cfg
         data_cfg = stage_dataset_config(cfg, stage, self.validation)
-        self.dataset = create_dataset(data_cfg, cfg)
-        seed = cfg.seed if self.validation else cfg.seed + groups.get_rank() + self.loader_step
-        if self.validation and cfg.get("inference_sequential_val", False):
-            sampler = torch.utils.data.SequentialSampler(self.dataset)
-        else:
-            sampler = torch.utils.data.RandomSampler(
-                self.dataset, generator=self.sampler_generator, replacement=True
-            )
+        if not hasattr(self, "dataset") or self.dataset_stage != stage:
+            self.dataset = create_dataset(data_cfg, cfg)
+        seed = cfg.seed if self.validation else cfg.seed + groups.get_rank()
+        sequential = self.validation and cfg.get("inference_sequential_val", False)
+        self.source_sampler = ResumableSampler(self.dataset, self.sampler_generator, shuffle=not sequential)
+        self.source_batch_size = data_cfg.batch_size
         loader = torch.utils.data.DataLoader(
             self.dataset,
-            sampler=sampler,
+            sampler=self.source_sampler,
             batch_size=data_cfg.batch_size,
             pin_memory=True,
             num_workers=data_cfg.num_workers,
@@ -60,9 +59,22 @@ class BatchLoader:
             timeout=data_cfg.timeout if data_cfg.num_workers else 0,
             collate_fn=raw_collate,
             worker_init_fn=partial(worker_init_fn, seed=seed, dataset=self.dataset),
+            generator=torch.Generator().manual_seed(seed),
         )
         self.loader = cycle(loader)
         self.dataset_stage = stage
+
+    def read_source(self):
+        """Consume one decoded batch without advancing the model's random stream."""
+        state = rng_state()
+        try:
+            sample = next(self.loader)
+            self.source_sampler.acknowledge(self.source_batch_size)
+            return sample
+        finally:
+            # With no workers, dataset augmentation runs in this process and
+            # reseeds Python, NumPy and Torch. Keep those draws local to data.
+            restore_rng(state)
 
     def set_stage(self, stage):
         # Keep queued SHORT clips when switching the loader to FULL data.
@@ -79,7 +91,7 @@ class BatchLoader:
         # Step 1: Decode the next source and retain every view/time window.
         started = time.monotonic()
         if not self.pending:
-            self.pending.extend(source_documents(next(self.loader), self.stage, self.cfg.h3.short_frames))
+            self.pending.extend(source_documents(self.read_source(), self.stage, self.cfg.h3.short_frames))
         self.last_timings["decode_seconds"] = time.monotonic() - started
 
         # Step 2: Encode pixels and draw the latent blocks used by captions.
@@ -159,19 +171,94 @@ class BatchLoader:
                 view["text_tags"] = tag_values[values[0][0]]
 
     def state_dict(self):
-        # Queues preserve already-decoded samples and their chunk/caption plan.
-        # Worker prefetch cursors are not serialized by PyTorch's DataLoader.
+        # Keep decoded documents and all issued source indices. Rebuilding a
+        # worker pool must replay its outstanding work before drawing new rows.
+        source_sampler = getattr(self, "source_sampler", None)
         return dict(
             pending=list(self.pending),
             mixed=list(self.mixed),
             stage=self.stage,
             sampler=self.sampler_generator.get_state(),
+            source_sampler=source_sampler.state_dict() if source_sampler is not None else None,
         )
 
     def load_state_dict(self, state):
         self.pending, self.mixed = deque(state["pending"]), deque(state["mixed"])
-        self.set_stage(state["stage"])
+        self.stage = state["stage"]
         self.sampler_generator.set_state(state["sampler"])
+        if hasattr(self, "dataset"):
+            self.build_loader(self.stage)
+            if state.get("source_sampler") is not None:
+                self.source_sampler.load_state_dict(state["source_sampler"])
+            else:
+                warnings.warn(
+                    "This checkpoint has no source-index cursor. Weights and queued samples are restored, "
+                    "but future source samples cannot exactly replay the previous run.",
+                    RuntimeWarning,
+                )
+
+
+class ResumableSampler(torch.utils.data.Sampler):
+    """Keep generated, prefetched and consumed source indices distinct.
+
+    Dataset items already seed augmentation from their index. Saving indices
+    is enough to rebuild their prefetch queue without serializing workers.
+    """
+
+    def __init__(self, dataset, generator, shuffle=True):
+        self.size = len(dataset)
+        if self.size <= 0:
+            raise ValueError("Cannot sample an empty source dataset")
+        self.generator = generator
+        self.shuffle = shuffle
+        self.generated = 0
+        self.pending = deque()
+        self.buffer = deque()
+
+    def __len__(self):
+        return self.size
+
+    def __iter__(self):
+        # A new worker pool first decodes indices that were already issued.
+        yield from tuple(self.pending)
+        while True:
+            if not self.buffer:
+                if self.generated == self.size:
+                    self.generated = 0
+
+                # Match RandomSampler's draw blocks, including the epoch tail.
+                count = min(32, self.size - self.generated)
+                if self.shuffle:
+                    indices = torch.randint(self.size, (count,), generator=self.generator).tolist()
+                else:
+                    indices = range(self.generated, self.generated + count)
+                self.buffer.extend(indices)
+                self.generated += count
+            index = self.buffer.popleft()
+            self.pending.append(index)
+            yield index
+
+    def acknowledge(self, count=1):
+        # Advance only after the main process receives the decoded source.
+        for _ in range(count):
+            self.pending.popleft()
+
+    def state_dict(self):
+        return dict(
+            size=self.size,
+            shuffle=self.shuffle,
+            generated=self.generated,
+            pending=list(self.pending),
+            buffer=list(self.buffer),
+            generator=self.generator.get_state(),
+        )
+
+    def load_state_dict(self, state):
+        if (state["size"], state["shuffle"]) != (self.size, self.shuffle):
+            raise ValueError("Source dataset size or sampling order changed since the checkpoint")
+        self.generated = state["generated"]
+        self.pending, self.buffer = deque(state["pending"]), deque(state["buffer"])
+        self.generator.set_state(state["generator"])
 
 
 def raw_collate(samples):

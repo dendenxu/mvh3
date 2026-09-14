@@ -1,10 +1,89 @@
+import random
+from itertools import islice
 from types import SimpleNamespace
 
 import torch
+import pytest
+import numpy as np
+from omegaconf import OmegaConf
 
 from h3.encoders import TextEncoder
+from utils.checkpoint import rng_state
+from dataset import loader as data_loading
 from h3.modules.masking import CLEAN, TokenLayout
 from h3.modules.kv_cache import make_caches, HistoryCache
+
+
+class ReplayDataset(torch.utils.data.Dataset):
+    """Use the same per-index augmentation seeding as the source datasets."""
+
+    def __len__(self):
+        return 71
+
+    def __getitem__(self, index):
+        random.seed(index)
+        np.random.seed(index)
+        torch.manual_seed(index)
+        return dict(index=index, python=random.random(), numpy=np.random.rand(), tensor=torch.rand(4))
+
+
+def replay_loader(monkeypatch, workers, sequential=False):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(data_loading, "create_dataset", lambda *args: ReplayDataset())
+    data_cfg = SimpleNamespace(batch_size=1, num_workers=workers, prefetch_factor=3, timeout=10)
+    monkeypatch.setattr(data_loading, "stage_dataset_config", lambda *args: data_cfg)
+    cfg = OmegaConf.create(dict(seed=123, h3=dict(stage=1), inference_sequential_val=sequential))
+    return data_loading.BatchLoader(cfg, None, None, validation=sequential)
+
+
+@pytest.mark.parametrize("workers", [0, 2])
+@pytest.mark.parametrize("sequential", [False, True])
+@pytest.mark.parametrize("cut", [5, 32])
+def test_source_resume_replays_prefetch_and_preserves_model_rng(
+    tmp_path, monkeypatch, workers, sequential, cut
+):
+    baseline = replay_loader(monkeypatch, workers, sequential)
+    before = rng_state()
+    for _ in range(cut):
+        baseline.read_source()
+    after = rng_state()
+    assert before["python"] == after["python"]
+    assert np.array_equal(before["numpy"][1], after["numpy"][1])
+    assert before["numpy"][2:] == after["numpy"][2:]
+    assert torch.equal(before["torch"], after["torch"])
+
+    # Save with workers still holding outstanding samples, then cross both
+    # the sampler's buffered-draw boundary and a complete source epoch.
+    path = tmp_path / "source.pt"
+    torch.save(baseline.state_dict(), path)
+    expected = [baseline.read_source() for _ in range(90)]
+    resumed = replay_loader(monkeypatch, workers, sequential)
+    resumed.load_state_dict(torch.load(path, weights_only=False))
+    actual = [resumed.read_source() for _ in range(90)]
+    for original, restored in zip(expected, actual):
+        assert original["index"] == restored["index"]
+        assert original["python"] == restored["python"]
+        assert original["numpy"] == restored["numpy"]
+        assert torch.equal(original["tensor"], restored["tensor"])
+    baseline.loader.close()
+    resumed.loader.close()
+
+
+def test_source_sampler_keeps_existing_random_draw_order():
+    generator = torch.Generator().manual_seed(734)
+    reference = []
+    for _ in range(3):
+        reference.extend(torch.utils.data.RandomSampler(range(71), replacement=True, generator=generator))
+    sampler = data_loading.ResumableSampler(range(71), torch.Generator().manual_seed(734))
+    assert list(islice(sampler, len(reference))) == reference
+
+
+def test_legacy_source_resume_reports_missing_cursor(monkeypatch):
+    stream = replay_loader(monkeypatch, 0)
+    state = stream.state_dict()
+    state.pop("source_sampler")
+    with pytest.warns(RuntimeWarning, match="no source-index cursor"):
+        stream.load_state_dict(state)
 
 
 class Tokens(dict):
