@@ -148,7 +148,8 @@ class StaticDataset(Dataset):
         # fps is read from the parquet `fps` column; frames are subsampled by
         # `max(1, src_fps / model_fps)` to match the model rate.
         model_fps: int = 24,
-        sampling_weight_power: float = 0.8,  # default MUST match aggregator's getattr fallback (0.8); the attr is always set here so the fallback never fires
+        # Keep the default consistent with the aggregator's fallback.
+        sampling_weight_power: float = 0.8,
         # Single-view long-temporal alternative. When set, every successful
         # main-path pick has probability `long_gen_split` of being swapped
         # to a mv=1 × long_gen_size monocular sample on the same video.

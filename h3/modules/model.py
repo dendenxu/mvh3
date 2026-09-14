@@ -917,6 +917,9 @@ class MiniMaxH3Transformer3DModel(nn.Module):
             from h3.modules.grouped_attention import visibility_groups
 
             grouped_plan = visibility_groups(layout)
+
+        # 4. Run the Transformer stack on each rank's sequence shard. Reuse
+        # device-local masks and camera tables across blocks on the same device.
         for block_index, block in enumerate(self.transformer_blocks):
             # CPU-offloaded FSDP parameters are resident on CPU between calls.
             block_device = hidden_states.device if sequence_parallel else next(block.parameters()).device

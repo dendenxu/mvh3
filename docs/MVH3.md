@@ -12,14 +12,14 @@ Long workflows use blank lines and short Step comments to mark their phases.
 | Responsibility                                   | Code to read                                                             |
 | ------------------------------------------------ | ------------------------------------------------------------------------ |
 | Config loading and task selection                | `main.py`, `utils/config.py`                                             |
-| Training loop and one optimizer update           | `trainer/diffusion.py`: `DiffusionTrainer.train_loop`, `train_step`               |
-| Source loading, encoding and SP sample queue     | `dataset/loader.py`: `BatchLoader.next`                                 |
-| Video VAE and native Qwen image/text features      | `h3/encoders.py`                                                    |
+| Training loop and one optimizer update           | `trainer/diffusion.py`: `DiffusionTrainer.train_loop`, `train_step`      |
+| Source loading, encoding and SP sample queue     | `dataset/loader.py`: `BatchLoader.next`                                  |
+| Video VAE and native Qwen image/text features    | `h3/encoders.py`                                                         |
 | Chunk boundaries, clean cut and caption overlap  | `model/chunks.py`, `utils/captions.py`                                   |
-| Noise sampling, flow loss and resampling forcing | `model/diffusion.py`: `DiffusionObjective`                              |
+| Noise sampling, flow loss and resampling forcing | `model/diffusion.py`: `DiffusionObjective`                               |
 | Joint token order, masks, camera/time tables     | `model/packing.py`: `SequencePacker`                                     |
-| Image/camera request to saved videos             | `pipeline/inference.py`: `run_inference`                                           |
-| Native joint sampling / trained chunk rollout    | `pipeline/full_sequence_inference.py`, `pipeline/chunked_inference.py`                |
+| Image/camera request to saved videos             | `pipeline/inference.py`: `run_inference`                                 |
+| Native joint sampling / trained chunk rollout    | `pipeline/full_sequence_inference.py`, `pipeline/chunked_inference.py`   |
 | Native denoiser, camera encoding and attention   | `h3/modules/model.py`, `camera.py`, `masking.py`, `grouped_attention.py` |
 | Camera modes and trainable attention             | `h3/modules/model.py`: `MiniMaxH3Transformer3DModel.configure_attention` |
 | Optimizer parameter groups                       | `trainer/diffusion.py`: `parameter_groups`                               |
@@ -28,8 +28,9 @@ Long workflows use blank lines and short Step comments to mark their phases.
 
 `scripts/infer.py` is a command-line adapter to `pipeline.inference.run_inference`.
 `main.py` calls that same pipeline for an `inference_request`; dataset validation
-uses `DiffusionTrainer.validate`. Scripts contain experiment commands and verification,
-not implementations imported by training.
+uses `DiffusionTrainer.validate`. Scripts contain reusable experiment commands,
+not implementations imported by training. Temporary verification probes stay
+under ignored `local/`.
 
 The network is `MiniMaxH3Transformer3DModel` in `h3/modules/model.py`. Its
 `__init__` defines input projections, the text refiner, Transformer blocks and

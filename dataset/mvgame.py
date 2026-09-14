@@ -318,7 +318,7 @@ def video_augmentation(
 ):
     """
     frames: N, C, H, W
-    o: the output size of the image, should always be smaller or equal to the input size, will first perform center crop of the original image to match the output size
+    o: output size, no larger than the input; the input is center-cropped first
     s: scale to apply, relative to principal point of the image
     c: the offset to the principal point of the image, this is relative to the output size
     r: relative rotation, in degrees, positive value means clockwise rotation of the image content
@@ -1183,7 +1183,8 @@ class MultiViewDataset(Dataset):
         pose_stable_factors=1.0,  # float or list of floats; picks closest to max_t in log space
         disable_augmentation_ratio: float = 1.0,  # for 0.25 of all samples, disable augmentation completely
         image_aug: bool = False,  # image-space aug (gblur, color jitter, noise); gated by the same disable_aug switch as video aug
-        gamma_correction: bool = False,  # adaptive gamma on loaded raw frames (matches aug_views behaviour); applied regardless of disable_aug
+        # Match aug_views' adaptive gamma, regardless of disable_aug.
+        gamma_correction: bool = False,
         max_fov_h_deg: float = None,  # cap output h-FoV by per-frame s_min floor (None=off; see video_augmentation)
         sp_sharding: bool = False,
         # FPS resampling
@@ -1546,7 +1547,7 @@ class MultiViewDataset(Dataset):
         3. The starting frame index is randomly selected
         4. The offset of supporting views has a small global perturbation
         5. There's another set of chaos offsets (every frame is different) added onto the already perturbed offsets
-        6. The zooming factor, principal points of the camera and the roll of the camera are all selected using similar acceleration-based criteria
+        6. Zoom, principal point and camera roll follow similar acceleration-based sampling:
             - camera roll
             - zooming factor (also takes into account the minimum zooming required for the rolling)
             - cx offset

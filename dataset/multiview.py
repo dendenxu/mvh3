@@ -106,10 +106,12 @@ class MultiViewRealDataset(Dataset):
         disable_augmentation_ratio: float = 1.0,
         image_aug: bool = False,  # mvgame-style image aug (gblur/color jitter/noise); gated by disable_aug
         gamma_correction: bool = False,  # mvgame-style aggressive lift-to-0.25 (mvgame_raw); applied regardless of disable_aug
-        exposure_clamp: bool = False,  # loose two-sided exposure clamp for real data (only extreme tails fire); see compute_sequence_gamma + LOOSE_EXPOSURE_BAND
+        # Clamp only extreme exposure tails; see LOOSE_EXPOSURE_BAND.
+        exposure_clamp: bool = False,
         max_fov_h_deg: float = None,  # cap output h-FoV by per-frame s_min floor (None=off)
         sp_sharding: bool = False,
-        sampling_weight_power: float = 0.8,  # default MUST match aggregator's getattr fallback (0.8); the attr is always set here so the fallback never fires
+        # Keep the default consistent with the aggregator's fallback.
+        sampling_weight_power: float = 0.8,
         # Per-camera video filename template relative to video_path.
         # Default matches EgoExo4D/Waymo layout ('<scene>/0.mp4' ... '<scene>/N-1.mp4').
         # Override for mvgame-raw: 'video/{c:06d}.mp4'.
