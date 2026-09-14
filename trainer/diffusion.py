@@ -90,7 +90,6 @@ class DiffusionTrainer:
             restore_rng(restored["rng"])
         self.data_loader.set_stage(self.stage)
         self.validation_loader = None
-        self.seen_shapes = set()
         self.tracker = Tracker(cfg, self.logdir, self.step)
         self.requests = Requests()
 
@@ -128,13 +127,9 @@ class DiffusionTrainer:
                 document, override = self.pending_resampling_forcing
                 timings = dict(decode_seconds=0.0, vae_seconds=0.0, text_seconds=0.0, sp_gather_seconds=0.0)
             timings["data_seconds"] = time.monotonic() - started
-            shape = tuple(
-                (tuple(v["latent"].shape), v["text"].shape[1], v["condition"] is not None)
-                for v in document["views"]
-            )
-            if shape not in self.seen_shapes:
-                torch.cuda.empty_cache()
-                self.seen_shapes.add(shape)
+
+            # Captions vary within the same compile bucket. Retain allocator
+            # buffers across samples; explicit warmup/interval cleanup is below.
             log = self.train_step(document, override)
 
             # A peer may compile, decode or process a larger sample while rank

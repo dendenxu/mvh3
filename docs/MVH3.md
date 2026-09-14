@@ -145,6 +145,8 @@ original FA4 runtime and FSDP boundaries. The grouped backward path belongs to
 H3: queries with identical visible K/V share native varlen backward calls.
 AdamW clears gradients in place, retaining their CPU storage so FSDP does not
 reconstruct the flat gradient during backward.
+The CUDA allocator also retains buffers across source samples. Caption length
+changes do not flush it; explicit warmup and interval settings control cleanup.
 
 Training, overfit and inference seed Python, NumPy and Torch and enable
 deterministic library algorithms before model execution. This also fixes
