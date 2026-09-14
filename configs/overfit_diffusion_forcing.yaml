@@ -2,8 +2,8 @@
 parents:
 - worldviews.yaml
 - diffusion_forcing.yaml
-max_iters: 2048
-save_interval: 256
+max_iters: 2000
+save_interval: 500
 auto_resume: true
 generator_cpu_offload: true
 resampling_forcing: false
@@ -15,8 +15,8 @@ overfit:
   frames: 77
   views:
   - 0
-  eval_interval: 64
-  generation_interval: 256
+  eval_interval: 100
+  generation_interval: 500
   eval_sigmas:
   - 0.25
   - 0.5

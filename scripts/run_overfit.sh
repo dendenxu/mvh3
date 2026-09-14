@@ -32,7 +32,7 @@ export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}"
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 printf 'Host: %s\nStarted: %s\n' "$(hostname)" "$overfit_stamp"
 "$overfit_python" -m torch.distributed.run --standalone --nproc_per_node=8 \
-    --module scripts.overfit --config "$overfit_config" --features "$overfit_features" --output "$overfit_output" --stop-after 256
+    --module scripts.overfit --config "$overfit_config" --features "$overfit_features" --output "$overfit_output" --stop-after 500
 "$overfit_python" -m torch.distributed.run --standalone --nproc_per_node=8 \
     --module scripts.overfit --config "$overfit_config" --features "$overfit_features" --output "$overfit_output"
 echo "Overfit training and decoded comparisons complete."
