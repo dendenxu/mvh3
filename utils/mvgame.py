@@ -31,6 +31,7 @@ def draw_view_acc_abs(view_acc_abs_min: float, view_acc_abs_max: float, disable_
     mean = (view_acc_abs_max + view_acc_abs_min) / 2
     std = (view_acc_abs_max - view_acc_abs_min) / 6
     view_acc_abs = np.random.normal(mean, std)
+
     # clip to avoid cpp errors on the tail (matches getitem_impl)
     return float(np.clip(view_acc_abs, view_acc_abs_min, view_acc_abs_max))
 
@@ -72,6 +73,7 @@ def build_main_walk(
         view = np.random.choice(view_sample)
         indices = np.asarray([(view, frame) for frame in range(total_frame_size)])
     indices = np.array(indices, copy=True)  # own the slice before in-place remap
+
     # Remap frame indices model-fps -> source-fps space, then offset to the window.
     if row_fps_ratio != 1.0:
         cap = (n_frames_src - 1) if n_frames_src is not None else None

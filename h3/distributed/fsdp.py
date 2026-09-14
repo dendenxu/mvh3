@@ -1,13 +1,12 @@
 """FSDP/Ulysses wrapping, activation checkpointing and compilation."""
 
-from functools import partial
 from pathlib import Path
+from functools import partial
 
 import torch
-from torch.distributed.fsdp import CPUOffload
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 from torch.utils.checkpoint import checkpoint
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import CPUOffload, MixedPrecision, ShardingStrategy
 
 from utils import distributed as groups
 
@@ -48,6 +47,7 @@ def wrap_model(model, cfg):
     if model.config.num_attention_heads % groups.get_sp_size():
         raise ValueError("H3 attention heads must be divisible by SP size")
     mp, full = fsdp_options(cfg), fsdp_options(cfg, mixed=False)
+
     # Keep mixed checkpoint dtypes in separate FlatParameters. Wrapping the
     # whole native model at once would flatten BF16 and FP32 storage together.
     for i, block in enumerate(model.transformer_blocks):
@@ -84,6 +84,7 @@ def compile_blocks(model, cfg):
         torch._dynamo.config.accumulated_recompile_limit, 4096
     )
     torch._dynamo.config.automatic_dynamic_shapes = False
+
     # Preserve native BF16 rounding at casts even when a camera overlay makes
     # a different fusion graph. Otherwise an identity camera changes the output.
     if cfg.h3.get("exact_init", False):
@@ -124,7 +125,7 @@ def save_compile_cache(directory):
 
 
 def load_compile_cache(directory):
-    from utils.compile import CacheArtifactManager, reregister, union_fold
+    from utils.compile import reregister, union_fold, CacheArtifactManager
 
     path = Path(directory) / f"rank{groups.get_rank()}.bin"
     if path.is_file():

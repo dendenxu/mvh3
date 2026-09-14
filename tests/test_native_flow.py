@@ -3,8 +3,8 @@ from pathlib import Path
 import torch
 from fixtures_h3 import feature_document
 
-from h3.modules.masking import CONDITION
 from h3.packing import patchify
+from h3.modules.masking import CONDITION
 from h3.scheduler import MiniMaxH3Scheduler
 from model.diffusion import DiffusionObjective
 from utils.config import load_config, validate_config

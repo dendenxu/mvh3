@@ -1,16 +1,16 @@
 from copy import deepcopy
 
-import pytest
 import torch
+import pytest
 from fixtures_h3 import tiny_model
-from test_diffusion_forcing import df_recipe, planned_document
 from test_worldviews import dense_inputs
+from test_diffusion_forcing import df_recipe, planned_document
 
 from h3.compile_shapes import pad_camera
-from h3.distributed.fsdp import compile_blocks
-from h3.modules.camera import CameraBundle, camera_projection, precompute_camera
-from model.diffusion import DiffusionObjective
 from utils.config import validate_config
+from h3.distributed.fsdp import compile_blocks
+from model.diffusion import DiffusionObjective
+from h3.modules.camera import CameraBundle, camera_projection, precompute_camera
 
 
 @pytest.mark.parametrize("isolated", [False, True])

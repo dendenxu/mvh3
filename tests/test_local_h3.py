@@ -1,23 +1,23 @@
 """Numerical oracles for expanding Diffusers into local PyTorch implementations."""
 
+import sys
 import json
 import subprocess
-import sys
 from pathlib import Path
 
-import pytest
 import torch
+import pytest
 from safetensors.torch import save_file
 
-from h3.modules.vae import AutoencoderKLMiniMaxH3
 from h3.scheduler import MiniMaxH3Scheduler
+from h3.modules.vae import AutoencoderKLMiniMaxH3
 
 
 def original_transformer_checkpoint(directory):
     """Build a small source-format fixture with distinguishable fused Q/K/V rows."""
     from fixtures_h3 import tiny_model
 
-    from h3.checkpoint import MINIMAX_H3_FP32_SOURCE_PREFIXES, get_transformer_key_plan
+    from h3.checkpoint import get_transformer_key_plan, MINIMAX_H3_FP32_SOURCE_PREFIXES
 
     config = dict(tiny_model().config)
     plan = get_transformer_key_plan(config)
@@ -152,9 +152,6 @@ class NoDiffusers(importlib.abc.MetaPathFinder):
         if fullname == 'diffusers' or fullname.startswith('diffusers.'):
             raise RuntimeError('Runtime imported Diffusers: ' + fullname)
 sys.meta_path.insert(0, NoDiffusers())
-sys.path.insert(0, 'scripts')
-import runtime_env  # isort: skip
-# isort: split
 import h3.modules.model, h3.modules.vae, h3.checkpoint
 import model.diffusion, trainer.diffusion, pipeline.chunked_inference
 """

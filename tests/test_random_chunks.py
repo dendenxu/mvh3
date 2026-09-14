@@ -1,16 +1,16 @@
 from copy import deepcopy
 
-import pytest
 import torch
-from fixtures_h3 import feature_document, tiny_model
-from test_worldviews import dense_inputs, recipe
+import pytest
+from test_worldviews import recipe, dense_inputs
+from fixtures_h3 import tiny_model, feature_document
 
-from h3.modules.kv_cache import HistoryCache
-from h3.modules.masking import CLEAN, NOISY, TokenLayout
-from model.chunks import caption_chunk, chunk_intervals, prepare_chunk_plan, source_chunk_ids, view_chunk_ids
-from model.diffusion import DiffusionObjective
-from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.config import validate_config
+from h3.modules.kv_cache import HistoryCache
+from model.diffusion import DiffusionObjective
+from h3.modules.masking import CLEAN, NOISY, TokenLayout
+from utils.checkpoint import load_checkpoint, save_checkpoint
+from model.chunks import caption_chunk, view_chunk_ids, chunk_intervals, source_chunk_ids, prepare_chunk_plan
 
 
 def random_recipe():
@@ -88,6 +88,7 @@ def test_source_captions_keep_distinct_features_tags_and_time_origins():
     n = sum(i + 2 for i in range(4))
     assert torch.equal(inputs["encoder_hidden_states"], torch.cat([x for _, x in view["texts"]], 1))
     assert inputs["attention_mask"].chunk[:n].tolist() == [0, 0] + [1] * (n - 2)
+
     # Newly merged future captions must not shift the established media origin.
     assert inputs["position_ids"][n, 0] == 2
 
@@ -130,16 +131,20 @@ def test_future_caption_changes_do_not_change_earlier_random_chunks():
     torch.testing.assert_close(results[0], results[1], rtol=1e-5, atol=1e-6)
 
 
-def test_pending_rf_partition_is_retained_after_checkpoint_restore(tmp_path):
+@pytest.mark.parametrize("legacy_fields", [False, True])
+def test_pending_resampling_forcing_partition_is_retained_after_checkpoint_restore(tmp_path, legacy_fields):
     cfg, doc = random_recipe(), feature_document(frames=77)
     planned = prepare_chunk_plan(doc, cfg, "cpu")
     model = torch.nn.Linear(3, 2)
     optimizer = torch.optim.AdamW(model.parameters())
-    checkpoint = save_checkpoint(
-        model, optimizer, cfg, 1, 1, {"pending_rf": (planned, [planned["views"][0]["latent"]])}, tmp_path
-    )
+    pending_key = "pending_rf" if legacy_fields else "pending_resampling_forcing"
+    depth_key = "depth" if legacy_fields else "resampling_forcing_depth"
+    runtime = {pending_key: (planned, [planned["views"][0]["latent"]]), depth_key: 2}
+    checkpoint = save_checkpoint(model, optimizer, cfg, 1, 1, runtime, tmp_path)
     restored = load_checkpoint(model, optimizer, cfg, checkpoint)
-    pending = restored["runtime"]["pending_rf"][0]
+    assert restored["runtime"]["resampling_forcing_depth"] == 2
+    assert "pending_rf" not in restored["runtime"] and "depth" not in restored["runtime"]
+    pending = restored["runtime"]["pending_resampling_forcing"][0]
     state = torch.get_rng_state()
     assert prepare_chunk_plan(pending, cfg, "cpu") is pending
     assert torch.equal(state, torch.get_rng_state())

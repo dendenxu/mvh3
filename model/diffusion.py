@@ -2,14 +2,14 @@
 
 import torch
 
-from h3.modules.masking import CLEAN, CONDITION, NOISY
 from h3.packing import unpatchify
-from model.chunks import prepare_chunk_plan, prepare_clean_prefix, view_chunk_ids
 from model.packing import SequencePacker
-from utils.camera import prepare_camera_geometry
-from utils.captions import bind_caption_features
 from utils.distributed import broadcast_scoped
 from utils.scheduler import FlowMatchScheduler
+from utils.camera import prepare_camera_geometry
+from utils.captions import bind_caption_features
+from h3.modules.masking import CLEAN, NOISY, CONDITION
+from model.chunks import view_chunk_ids, prepare_chunk_plan, prepare_clean_prefix
 
 
 class DiffusionObjective:
@@ -31,30 +31,35 @@ class DiffusionObjective:
         )
 
     def compute_loss(self, model, document, device, step, override=None):
-        """Predict clean-minus-noise on supervised tokens and prepare optional RF.
+        """Predict clean-minus-noise on supervised tokens and prepare optional resampling forcing.
 
         The packer records which video/latent frames each output slice belongs
-        to. RF uses those records to reconstruct a detached clean prediction;
-        the trainer decides whether every replica may reuse it on the next step.
+        to. Resampling forcing reconstructs a detached clean prediction from
+        those records; the trainer decides whether replicas reuse it next step.
         """
         cfg = self.cfg
         document = self.prepare_document(document, device)
         inputs, target, weights, records, high = self.pack(document, device, step, override)
         prediction = model(**inputs).sample
+
         # Average channels first, then weight tokens by visible pixel area.
         # Clean-prefix and image-condition rows have zero supervision weight.
         token_error = (prediction.float() - target.float()).square().mean(-1)[0]
         loss = (token_error * weights).sum() / weights.sum().clamp_min(1)
-        rf = cfg.resampling_forcing and step >= cfg.resampling_forcing_warmup_steps and not high
-        rf = rf and any(int(view_chunk_ids(v, cfg.chunk_size).max()) > 0 for v in document["views"])
+        resampling_forcing = (
+            cfg.resampling_forcing and step >= cfg.resampling_forcing_warmup_steps and not high
+        )
+        resampling_forcing = resampling_forcing and any(
+            int(view_chunk_ids(v, cfg.chunk_size).max()) > 0 for v in document["views"]
+        )
         if cfg.h3.get("single_sequence", False):
             next_document = self.resample_document(document)
-            rf = rf and any(
+            resampling_forcing = resampling_forcing and any(
                 new["clean_prefix_chunks"] > old["clean_prefix_chunks"]
                 for old, new in zip(document["views"], next_document["views"])
             )
         x0 = None
-        if rf:
+        if resampling_forcing:
             x0 = []
             for record in records:
                 velocity = unpatchify(
@@ -62,6 +67,7 @@ class DiffusionObjective:
                 )
                 denoised = record["noisy"] + record["sigmas"][None, None, :, None, None] * velocity
                 x0.append(denoised.cpu())
+
         # Conditions/history have separate AdaLN rows. Log the generated
         # frames' noise levels, rather than averaging those clean rows into t.
         target_sigmas = []
@@ -78,7 +84,7 @@ class DiffusionObjective:
         log = dict(
             high=high,
             tokens=len(inputs["token_tags"]),
-            rf=rf,
+            resampling_forcing=resampling_forcing,
             x0=x0,
             sigma=float(target_sigmas.mean()),
             sigma_min=float(target_sigmas.min()),
@@ -264,8 +270,9 @@ class DiffusionObjective:
     def resample_document(self, document):
         if not self.cfg.h3.get("single_sequence", False):
             return document
-        # RF promotes one predicted block to history. Reusing the same cut
-        # would only recycle the already-clean prefix and be a no-op.
+
+        # Resampling forcing promotes one predicted block to history. Reusing
+        # the same cut would only recycle the already-clean prefix.
         chunk_counts = [int(v["generation_chunks"].max()) + 1 for v in document["views"]]
         limit = min(chunk_counts) - 1
         views = []

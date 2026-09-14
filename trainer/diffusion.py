@@ -3,27 +3,27 @@
 import gc
 import json
 import time
-from contextlib import nullcontext
-from functools import partial
 from pathlib import Path
+from functools import partial
+from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
 from omegaconf import OmegaConf
 
-from dataset.loader import BatchLoader
-from h3.distributed.fsdp import compile_blocks, load_compile_cache, save_compile_cache, wrap_model, wrap_text
-from h3.encoders import TextEncoder, VideoEncoder
-from h3.modules.model import MiniMaxH3Transformer3DModel
-from model.diffusion import DiffusionObjective
-from utils import distributed as groups
-from utils.checkpoint import load_checkpoint, restore_rng, rng_state, save_checkpoint
-from utils.config import validate_config
-from utils.control import Requests
-from utils.distributed import canonical_name
-from utils.ema import ShardedEMA, inference_weight_kind
 from utils.random import set_seed
+from utils.control import Requests
 from utils.tracking import Tracker
+from dataset.loader import BatchLoader
+from utils import distributed as groups
+from utils.config import validate_config
+from utils.distributed import canonical_name
+from model.diffusion import DiffusionObjective
+from h3.encoders import TextEncoder, VideoEncoder
+from utils.ema import ShardedEMA, inference_weight_kind
+from h3.modules.model import MiniMaxH3Transformer3DModel
+from utils.checkpoint import rng_state, restore_rng, load_checkpoint, save_checkpoint
+from h3.distributed.fsdp import wrap_text, wrap_model, compile_blocks, load_compile_cache, save_compile_cache
 
 
 class DiffusionTrainer:
@@ -63,8 +63,8 @@ class DiffusionTrainer:
         self.objective = DiffusionObjective(cfg)
         self.step = 0
         self.stage = cfg.h3.stage
-        self.pending_rf = None
-        self.depth = 0
+        self.pending_resampling_forcing = None
+        self.resampling_forcing_depth = 0
 
         # Step 3: Restore weights and optimizer state before constructing encoders.
         resume = cfg.resume_ckpt
@@ -75,7 +75,10 @@ class DiffusionTrainer:
             raise ValueError("Stage 2 continues a stage-1 checkpoint; set resume_ckpt or use auto_resume")
         if restored:
             self.step, self.stage = restored["step"], max(cfg.h3.stage, restored["stage"])
-            self.pending_rf, self.depth = restored["runtime"]["pending_rf"], restored["runtime"]["depth"]
+            self.pending_resampling_forcing, self.resampling_forcing_depth = (
+                restored["runtime"]["pending_resampling_forcing"],
+                restored["runtime"]["resampling_forcing_depth"],
+            )
 
         # Step 4: Construct encoders and queues, then restore RNG consumed by setup.
         set_seed(cfg.seed + groups.get_rank() + self.step)
@@ -113,16 +116,16 @@ class DiffusionTrainer:
                 self.save()
                 self.stage = 2
                 self.data_loader.set_stage(2)
-            if self.pending_rf is None:
-                # RF can retain the same planned sequence across updates. Fresh
+            if self.pending_resampling_forcing is None:
+                # Resampling forcing can reuse a planned sequence. Fresh
                 # samples already carry their chunk captions from the loader.
                 document = self.data_loader.next()
                 override = None
-                self.depth = 0
+                self.resampling_forcing_depth = 0
                 timings = dict(self.data_loader.last_timings)
                 document = self.objective.prepare_document(document, self.device)
             else:
-                document, override = self.pending_rf
+                document, override = self.pending_resampling_forcing
                 timings = dict(decode_seconds=0.0, vae_seconds=0.0, text_seconds=0.0, sp_gather_seconds=0.0)
             timings["data_seconds"] = time.monotonic() - started
             shape = tuple(
@@ -133,6 +136,7 @@ class DiffusionTrainer:
                 torch.cuda.empty_cache()
                 self.seen_shapes.add(shape)
             log = self.train_step(document, override)
+
             # A peer can keep compiling while rank zero reuses a warm graph.
             total_graphs = torch._dynamo.utils.counters["stats"]["unique_graphs"]
             compile_counts = torch.tensor([total_graphs - previous_graphs, total_graphs], device=self.device)
@@ -142,7 +146,7 @@ class DiffusionTrainer:
             log.update(
                 step=self.step,
                 stage=self.stage,
-                sf_depth=self.depth,
+                resampling_forcing_depth=self.resampling_forcing_depth,
                 new_compile_graphs=int(compile_counts[0]),
                 compile_graphs_total=int(compile_counts[1]),
                 seconds=time.monotonic() - started,
@@ -196,6 +200,7 @@ class DiffusionTrainer:
         # Step 2: Backpropagate and clip the global sharded gradient.
         phase_started = time.monotonic()
         loss.backward()
+
         # FSDP computes the norm across parameter shards. A local torch norm
         # would clip each shard differently and change the global update.
         norm = self.model.clip_grad_norm_(cfg.clip_grad_norm)
@@ -216,17 +221,23 @@ class DiffusionTrainer:
         timings["ema_seconds"] = time.monotonic() - ema_started
 
         # Step 4: Agree whether to reuse this sequence for resampling forcing.
-        rf = bool(log.pop("rf")) and (
-            not cfg.resampling_forcing_max_depth or self.depth < cfg.resampling_forcing_max_depth
+        resampling_forcing = bool(log.pop("resampling_forcing")) and (
+            not cfg.resampling_forcing_max_depth
+            or self.resampling_forcing_depth < cfg.resampling_forcing_max_depth
         )
+
         # FSDP replicas must agree on reusing the sample before the next forward.
-        eligible = torch.tensor(int(rf), device=self.device)
+        eligible = torch.tensor(int(resampling_forcing), device=self.device)
         if cfg.resampling_forcing_global_sync:
             dist.all_reduce(eligible, op=dist.ReduceOp.MIN)
         x0 = log.pop("x0")
-        self.pending_rf = (self.objective.resample_document(document), x0) if eligible.item() else None
-        self.depth = self.depth + 1 if self.pending_rf else 0
-        timings["optimizer_and_rf_seconds"] = time.monotonic() - phase_started
+        self.pending_resampling_forcing = (
+            (self.objective.resample_document(document), x0) if eligible.item() else None
+        )
+        self.resampling_forcing_depth = (
+            self.resampling_forcing_depth + 1 if self.pending_resampling_forcing else 0
+        )
+        timings["optimizer_and_resampling_forcing_seconds"] = time.monotonic() - phase_started
         log.update(timings)
         log.update(loss=float(loss), grad_norm=float(norm))
         return log
@@ -276,6 +287,7 @@ class DiffusionTrainer:
             except Exception as error:
                 print(f"Visualization output failed on rank {groups.get_rank()}: {error}", flush=True)
                 failed.fill_(1)
+
         # Output failures happen only on SP leaders. Agree before any rank
         # enters the next text/model collective, including when errors are fatal.
         if dist.is_initialized():
@@ -285,8 +297,12 @@ class DiffusionTrainer:
 
     def save(self):
         # Keep the serialized 'stream' key compatible with existing checkpoints.
-        # Runtime queues carry the exact caption plan and pending RF clean cut.
-        runtime = dict(stream=self.data_loader.state_dict(), pending_rf=self.pending_rf, depth=self.depth)
+        # Runtime queues carry the exact caption plan and pending resampling forcing clean cut.
+        runtime = dict(
+            stream=self.data_loader.state_dict(),
+            pending_resampling_forcing=self.pending_resampling_forcing,
+            resampling_forcing_depth=self.resampling_forcing_depth,
+        )
         path = save_checkpoint(
             self.model,
             self.optimizer,

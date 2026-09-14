@@ -2,8 +2,8 @@
 """H3 Gaussian posterior and explicit encode/decode results."""
 from dataclasses import dataclass
 
-import numpy as np
 import torch
+import numpy as np
 
 from utils.random import randn_tensor
 

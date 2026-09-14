@@ -9,12 +9,12 @@ from dataclasses import replace
 
 import torch
 
-from h3.compile_shapes import pad_rows
-from h3.data import spatial_rotary_grid, temporal_rotary_clock
-from h3.modules.masking import CONDITION, TokenLayout
 from h3.packing import patchify
-from model.chunks import caption_chunk, view_chunk_ids
+from h3.compile_shapes import pad_rows
 from utils.distributed import get_sp_size
+from h3.modules.masking import CONDITION, TokenLayout
+from model.chunks import caption_chunk, view_chunk_ids
+from h3.data import spatial_rotary_grid, temporal_rotary_clock
 
 
 def same_text_conditioning(views, selected_chunk=None):
@@ -76,6 +76,7 @@ class SequencePacker:
         document, cfg, device = self.document, self.cfg, self.device
         views = document["views"]
         single_sequence = self.single_sequence
+
         # Decide sharing per chunk so future edits cannot change earlier prefixes.
         shared_chunks = set()
         for chunk, _ in views[0].get("texts", [(-1, views[0]["text"])]):
@@ -176,12 +177,14 @@ class SequencePacker:
         self.chunks.append(torch.where(token_kind == CONDITION, -1, token_chunk))
         self.kinds.append(token_kind)
         self.scopes.append(torch.full_like(token_chunk, view_index))
+
         # Temporal padding carries VAE reconstruction support. Masking it
         # corrupts real tail frames through the non-causal decoder.
         valid = (view["spatial_weights"].to(device)[None] > 0).expand(frame_count, -1, -1)
         self.active.append(valid.flatten())
         spatial = spatial_rotary_grid(h, w).to(device).repeat(frame_count, 1)
         clock = temporal_rotary_clock(len(source["frames"]), view["fps"]).to(device)[selected]
+
         # Unrelated or future captions cannot shift this video's RoPE clock.
         origin = self.text_time_origins[view_index] if document["isolated"] else sum(self.text_time_origins)
         times = origin + clock.repeat_interleave(h * w // 4)
@@ -245,6 +248,7 @@ class SequencePacker:
             pos = torch.cat((pos, torch.zeros((pad, 3), device=device)))
             sigma = torch.cat((sigma, torch.zeros(pad, device=device)))
             scale = torch.cat((scale, torch.zeros(pad, device=device)))
+
         # Share AdaLN rows across identical (sigma, scale), keeping conditioning
         # constant per view while noise remains independently sampled per chunk.
         table, time_ids = torch.unique(torch.stack((sigma, scale), -1), dim=0, return_inverse=True)

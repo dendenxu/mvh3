@@ -4,8 +4,9 @@ MVH3 trains the existing MiniMax H3 attention weights on WorldViews data. The
 layout follows WorldViews: the trainer runs updates, the model defines the
 objective, pipelines generate videos, and datasets supply examples. Native H3
 layers and kernels live in `h3/`. There is one root `utils/` for shared helpers;
-there are no nested utility or vendor trees. Imports are grouped and sorted.
-Long workflows use blank lines and short Step comments to mark their phases.
+there are no nested utility or vendor trees. Imports are grouped and sorted by
+length. Long workflows have a blank line before each phase's Step comment.
+Business terms such as resampling forcing are written out in full.
 
 ## Start here
 
@@ -27,6 +28,7 @@ Long workflows use blank lines and short Step comments to mark their phases.
 | Checkpoint state and averaged weights            | `utils/checkpoint.py`, `utils/ema.py`                                    |
 
 `scripts/infer.py` is a command-line adapter to `pipeline.inference.run_inference`.
+Launch it with `torchrun --module scripts.infer` from the repository root.
 `main.py` calls that same pipeline for an `inference_request`; dataset validation
 uses `DiffusionTrainer.validate`. Scripts contain reusable experiment commands,
 not implementations imported by training. Temporary verification probes stay
@@ -49,14 +51,14 @@ worldviews_reference.yaml + presampled_data.yaml
   -> worldviews.yaml               native H3, wrapped decomposed cameras, PSF off
   -> worldviews_grouped.yaml       grouped FA4 backward, fixed EMA 0.995
   -> diffusion_forcing.yaml        one sequence, random blocks, clean-prefix cut
-  -> stage1_diffusion_forcing.yaml RF off, context noise on, stay in Stage 1
+  -> stage1_diffusion_forcing.yaml resampling forcing off, context noise on, stay in Stage 1
   -> stage1_compile_buckets.yaml   padding buckets and checkpoint/compile order
 ```
 
 `main.py` defaults to `diffusion_forcing.yaml`. Select
 `stage1_compile_buckets.yaml` explicitly for the full-data Stage 1 run.
-Continue a DF checkpoint with its saved `resolved.yaml` and `h3.stage=2`.
-Stage transition, LR warmup and RF warmup are separate settings.
+Continue a diffusion forcing checkpoint with its saved `resolved.yaml` and `h3.stage=2`.
+Stage transition, learning rate warmup and resampling forcing warmup are separate settings.
 
 ## Training data flow
 
@@ -76,13 +78,13 @@ Stage transition, LR warmup and RF warmup are separate settings.
    Its records map output tokens back to the original view and latent frames.
 6. The model predicts `clean - noise`. Loss covers the noisy suffix, including
    decoder-support latents. The trainer clips gradients, updates AdamW, updates
-   EMA once, then decides whether RF will reuse the sample.
+   EMA once, then decides whether resampling forcing will reuse the sample.
 
 A document is a dictionary with `views`, `isolated` and `source`. Each encoded
 view carries `latent`, `condition`, `text`/`texts`, camera geometry, temporal
 coordinates and spatial loss weights. `generation_chunks` maps every latent to
 a block; `clean_prefix_chunks` is the cut. These fields also travel with pending
-RF/checkpoint state. Packing uses these concrete tensors directly.
+resampling forcing/checkpoint state. Packing uses these concrete tensors directly.
 
 Source captions retain their original Wan windows: the first has 17 source
 frames, later windows have 20. Include a motion sentence only when a generated
@@ -143,12 +145,12 @@ original FA4 runtime and FSDP boundaries. The grouped backward path belongs to
 H3: queries with identical visible K/V share native varlen backward calls.
 
 Any decision affecting FSDP collective order must agree across replicas.
-Sample metadata travels through SP gather; global noise-range and RF decisions
+Sample metadata travels through SP gather; global noise-range and resampling forcing decisions
 use their existing collectives. Check max-across-rank compile counts and all
 node logs when diagnosing throughput.
 
 Checkpoints contain raw trainable shards, AdamW, fixed EMA 0.995, RNG, the global
-step, source queues and pending RF state. Frozen weights load from original H3.
+step, source queues and pending resampling forcing state. Frozen weights load from original H3.
 The manifest becomes visible after all shards complete. Resume requires the same
 recipe and SP/FSDP topology. DataLoader worker prefetch state is not serialized,
 so future sample replay across processes is not guaranteed.

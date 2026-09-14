@@ -18,6 +18,7 @@ def affine_padding(c2w: torch.Tensor):
     # Already padded
     if c2w.shape[-2] == 4:
         return c2w
+
     # Batch agnostic padding
     sh = c2w.shape
     pad0 = c2w.new_zeros(sh[:-2] + (1, 3))  # B, 1, 3
@@ -32,6 +33,7 @@ def ixt_padding(K: torch.Tensor):
     # Already padded
     if K.shape[-2] == 4:
         return K
+
     # Batch agnostic padding
     sh = K.shape
     canvas = K.new_zeros(sh[:-2] + (4, 4))  # B, 4, 4

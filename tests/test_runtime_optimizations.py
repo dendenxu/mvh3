@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import torch
 
 from h3.encoders import TextEncoder
-from h3.modules.kv_cache import HistoryCache, make_caches
 from h3.modules.masking import CLEAN, TokenLayout
+from h3.modules.kv_cache import make_caches, HistoryCache
 
 
 class Tokens(dict):
@@ -130,9 +130,9 @@ def test_cfg_distilled_cache_uses_single_stream_budget():
     assert all(abs(a.budget_bytes - 2 * b.budget_bytes) <= 1 for a, b in zip(distilled, guided))
 
 
-def test_rf_warmup_skips_history_copy_and_starts_on_absolute_boundary():
-    from fixtures_h3 import feature_document
+def test_resampling_forcing_warmup_skips_history_copy_and_starts_on_absolute_boundary():
     from test_worldviews import recipe
+    from fixtures_h3 import feature_document
 
     from model.diffusion import DiffusionObjective
 
@@ -150,8 +150,8 @@ def test_rf_warmup_skips_history_copy_and_starts_on_absolute_boundary():
     torch.manual_seed(124)
     after, warm = objective.compute_loss(zero_velocity, document, "cpu", 12000)
     torch.testing.assert_close(before, after, rtol=0, atol=0)
-    assert cold["rf"] is False and cold["x0"] is None
-    assert warm["rf"] is True and len(warm["x0"]) == len(document["views"])
+    assert cold["resampling_forcing"] is False and cold["x0"] is None
+    assert warm["resampling_forcing"] is True and len(warm["x0"]) == len(document["views"])
     assert cold["sigma"] == cold["sigma_min"] == cold["sigma_max"] == 0.5
     assert all(value.shape == view["latent"].shape for value, view in zip(warm["x0"], document["views"]))
 

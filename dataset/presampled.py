@@ -16,26 +16,26 @@ Per-source augmentation is honored via a source-preset map from the training con
 
 import json
 import random
-from os.path import basename, dirname, join, normpath
+from os.path import join, dirname, basename, normpath
 
+import torch
 import numpy as np
 import pyarrow.parquet as pq
-import torch
 from torch.utils.data import Dataset
 
+from utils.random import set_seed
+from utils.camera import parse_poses
+from utils.console import log, blue, green
+from utils.parallel import parallel_execution
+from utils.distributed import get_rank, is_node_main, get_world_size
 from dataset.mvgame import (
+    pack_factory,
+    make_strip_pack,
+    finish_posed_video,
     LOOSE_EXPOSURE_BAND,
     compute_sequence_gamma,
-    finish_posed_video,
-    make_strip_pack,
-    pack_factory,
     select_pose_stable_factor,
 )
-from utils.camera import parse_poses
-from utils.console import blue, green, log
-from utils.distributed import get_rank, get_world_size, is_node_main
-from utils.parallel import parallel_execution
-from utils.random import set_seed
 
 try:
     from torch.utils.data import get_worker_info
@@ -84,6 +84,7 @@ def has_malformed_video_paths(mode, mv, video_paths, data_roots):
             return True
         path = raw_path.strip()
         root = str(roots[index] or "").strip()
+
         # A missing relative path was historically joined with data_root, turning
         # the source directory itself into a seemingly valid baked video path.
         if root and normpath(path) == normpath(root):
@@ -173,6 +174,7 @@ class PresampledDataset(Dataset):
         self.dataset_name = basename(spec)
         self.num_workers = int(num_workers or 1)
         self.exposure_clamp = bool(kwargs.get("exposure_clamp", False))
+
         # aug-mvgame decode: thread the per-source-camera opens+decodes inside decode_aug
         # (mirrors the live load_constructed_video num_workers=8). The serial per-sample
         # ~100 cold reader-opens + serial get_batch were the aug bottleneck (~30-55s/sample
@@ -198,6 +200,7 @@ class PresampledDataset(Dataset):
         self.shape_ranges = (
             json.loads(meta[b"presampled_shape_ranges"]) if b"presampled_shape_ranges" in meta else {}
         )
+
         # Per-source aug knobs: prefer the SELF-CONTAINED baked KV metadata; fall back
         # to reading the training config (legacy / unbaked parquets).
         if b"presampled_source_knobs" in meta:
@@ -211,8 +214,10 @@ class PresampledDataset(Dataset):
         # text (scene + [CHUNK] chunk_c) instead of global scene+motion; STATIC always global.
         self.has_embeds = "prompt_embeds" in small
         self.embed_base = dirname(spec)
+
         # OFF by default (base config); pre.yaml sets chunk_text_prob: 0.9 to enable.
         self.chunk_text_prob = float(kwargs.get("chunk_text_prob", 0.0))
+
         # Per-shape memory remap {"<mv>x<gen>": <target>} for KNOWN-OOM shapes. Per-GPU memory ∝ the
         # visual token count = views(V) × gen(F_lat) × tokens/frame, so V and gen are SYMMETRIC levers.
         # <target> is either an int (cap GEN only, e.g. 4x30->25) or a "<V'>x<G'>" string (cap BOTH
@@ -300,6 +305,7 @@ class PresampledDataset(Dataset):
         if self.n_samples == 0:
             self.shard_idx = np.array([], dtype=np.int64)
             return self.shard_idx
+
         # SHAPE-AWARE shard: the build shape-orders the rows, so stride WITHIN each
         # contiguous shape range and concatenate in shape order. Each worker's stream
         # is then grouped by shape (consecutive same-shape samples → far fewer
@@ -323,6 +329,7 @@ class PresampledDataset(Dataset):
         if self.inited:
             return
         self.shard_meta()
+
         # Lazily read the baked pose column ONLY for this worker's shard rows.
         self.pose_cache = {}
         if len(self.shard_idx):
@@ -461,6 +468,7 @@ class PresampledDataset(Dataset):
         gen_full = int(r["gen"])
         view_iso = bool(r["view_isolated"])
         tfs_full = gen_full * self.vae_stride_t - 3  # frames as baked in the parquet
+
         # Shape remap (memory workaround for KNOWN-OOM shapes). Per-GPU memory ∝ VISUAL tokens =
         # views(V) × gen(F_lat) × tokens/frame — V and gen are SYMMETRIC multipliers under SP, so
         # EITHER is an equally-valid lever. Config key "<mv>x<gen>" (the DRAWN shape); value is:
@@ -629,6 +637,7 @@ class PresampledDataset(Dataset):
         cpu["source_view_ids"] = list(r["view_ids"])[:mv]
         cpu["start_frames"] = np.asarray(r["frame_start"], dtype=np.int64)[:mv]
         cpu["end_frames"] = np.asarray(r["frame_end"], dtype=np.int64)[:mv]
+
         # view_as_batch folds mv→batch, so each batch row is ONE full-resolution view: emit a
         # mv=1 single-tile pack (NOT the mv-strip used to lay out the canvas). Otherwise
         # prepare_pack/unpack_encode_pack would slice mv strip tiles (x=0,W,2W,…) from a single
@@ -636,6 +645,7 @@ class PresampledDataset(Dataset):
         cpu["pack"] = {**(pack_factory[1] if view_iso else pack), "width": self.width, "height": self.height}
         cpu["pose_stable_factor"] = psf
         cpu["pose_max_t"] = pmax
+
         # NOTE: mono_iso uses view_as_batch (mv folded to batch → isolation automatic), so we
         # do NOT set view_isolated / per_view_text — the presampled path only ever uses GLOBAL
         # or PER-CHUNK text, never per-view (view_seq_lens unused; USER 2026-06-30).
@@ -674,6 +684,7 @@ class PresampledDataset(Dataset):
                     f"Presampled row {gi} has no complete cached text embeds "
                     f"for {text_views} loaded view(s)"
                 )
+
             # Presence-driven text pick (USER 2026-07-06): if one slot is blank, use the OTHER and
             # ignore the dice; if both present, roll chunk_text_prob (dynamic only — static is always
             # global). Short-video split pieces (split_presampled_short.py) blank the global on purpose
@@ -690,6 +701,7 @@ class PresampledDataset(Dataset):
                         else self.load_chunk_embeds(chunk_paths[0])
                     )
                 cpu["per_chunk_text"] = True
+
                 # Preserve the selected caption policy while replacing T5 caches.
                 raw_chunks = [
                     [f"{r['scene'][v]}\n[CHUNK]{caption}" for caption in cap(list(r["chunks"][v] or []))]

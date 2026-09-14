@@ -3,8 +3,8 @@
 import math
 from dataclasses import dataclass
 
-import numpy as np
 import torch
+import numpy as np
 
 
 def spatial_rotary_grid(height, width):
@@ -56,6 +56,7 @@ def temporal_layout(num_frames: int) -> TemporalLayout:
     ids = torch.arange(latents)
     anchors = 17 * (ids // 5) + 4 * (ids % 5)
     starts = 17 * (ids // 5) + torch.tensor([0, 1, 5, 9, 13])[ids % 5]
+
     # Use this only for requested duration/chunk boundaries, never attention/loss.
     valid = starts < num_frames
     return TemporalLayout(

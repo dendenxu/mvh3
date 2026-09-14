@@ -4,8 +4,8 @@ import random
 
 from torch.utils.data import Dataset
 
-from utils.console import blue, green, log, red, yellow
 from utils.distributed import is_node_main
+from utils.console import log, red, blue, green, yellow
 
 
 class DatasetAggregator(Dataset):
@@ -38,6 +38,7 @@ class DatasetAggregator(Dataset):
         self.datasets = datasets
         if weights is None:
             eff = [ds.effective_samples for ds in datasets]
+
             # sampling_weight_power controls how effective_samples maps to weight:
             #   default 0.8 → eff^0.8 (mild rebalancing, near size-proportional)
             #   0.6 / 0.5   → stronger small-dataset boost (0.5 = sqrt)
@@ -63,6 +64,7 @@ class DatasetAggregator(Dataset):
                     swp = getattr(ds, "sampling_weight_power", 0.8)
                     tag = f" [p={swp}]" if swp != 0.8 else ""
                     name = getattr(ds, "data_path", type(ds).__name__)
+
                     # Show just the filename for readability
                     if isinstance(name, str) and "/" in name:
                         name = name.rsplit("/", 1)[-1]

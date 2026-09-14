@@ -1,18 +1,18 @@
 from pathlib import Path
 
-import pytest
 import torch
+import pytest
 from fixtures_h3 import tiny_model
 
+from model.chunks import chunk_ids
 from dataset.loader import source_documents
 from h3.distributed.fsdp import compile_blocks
-from h3.modules.camera import apply_matrix, camera_projection
-from h3.modules.masking import CLEAN, NOISY, TokenLayout
-from model.chunks import chunk_ids
 from model.diffusion import DiffusionObjective
 from trainer.diffusion import parameter_groups
-from utils.checkpoint import load_checkpoint, save_checkpoint
+from h3.modules.masking import CLEAN, NOISY, TokenLayout
 from utils.config import load_config, stage_dataset_config
+from h3.modules.camera import apply_matrix, camera_projection
+from utils.checkpoint import load_checkpoint, save_checkpoint
 
 
 def recipe():
@@ -158,7 +158,7 @@ def test_complete_objective_updates_existing_weights_and_restores(tmp_path, monk
     assert torch.isfinite(loss)
     changed = {n for n, p in model.named_parameters() if not torch.equal(p, before[n])}
     assert changed and all(".attn." in n for n in changed)
-    path = save_checkpoint(model, optimizer, cfg, 123, 1, {"pending_rf": None}, tmp_path)
+    path = save_checkpoint(model, optimizer, cfg, 123, 1, {"pending_resampling_forcing": None}, tmp_path)
     saved = {n: p.clone() for n, p in model.named_parameters() if p.requires_grad}
     with torch.no_grad():
         for p in model.parameters():
@@ -218,9 +218,9 @@ def test_history_dropout_removes_only_noisy_history_edges():
 
 @pytest.mark.parametrize("raise_error", [False, True])
 def test_visualization_output_failure_obeys_recipe(monkeypatch, raise_error):
+    from utils import visualization
     from pipeline import chunked_inference
     from trainer.diffusion import DiffusionTrainer
-    from utils import visualization
 
     trainer = DiffusionTrainer.__new__(DiffusionTrainer)
     trainer.cfg, trainer.device = recipe(), torch.device("cpu")

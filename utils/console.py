@@ -4,9 +4,9 @@ import re
 import traceback
 from functools import lru_cache
 
-from rich.console import Console
-from rich.markup import escape
 from rich.style import Style
+from rich.markup import escape
+from rich.console import Console
 
 console = Console(soft_wrap=True, log_time_format="%H:%M:%S")
 MARKUP_TAG = re.compile(r"(?<!\\)\[([a-z#/@!][^\[\]]*)\]")

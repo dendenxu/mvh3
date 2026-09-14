@@ -10,6 +10,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 overfit_output="${1:-local/overfit_diffusion_forcing}"
 overfit_features="${2:-local/overfit_diffusion_forcing/features}"
 overfit_python="${MVH3_PYTHON:-python}"
+overfit_python="$(command -v "$overfit_python")"
+export PATH="$(dirname "$overfit_python"):$PATH"
 overfit_config="${3:-configs/overfit_diffusion_forcing.yaml}"
 mkdir -p "$overfit_output"
 exec 9>"$overfit_output/runner.lock"
@@ -30,7 +32,7 @@ export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}"
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 printf 'Host: %s\nStarted: %s\n' "$(hostname)" "$overfit_stamp"
 "$overfit_python" -m torch.distributed.run --standalone --nproc_per_node=8 \
-    scripts/overfit.py --config "$overfit_config" --features "$overfit_features" --output "$overfit_output" --stop-after 256
+    --module scripts.overfit --config "$overfit_config" --features "$overfit_features" --output "$overfit_output" --stop-after 256
 "$overfit_python" -m torch.distributed.run --standalone --nproc_per_node=8 \
-    scripts/overfit.py --config "$overfit_config" --features "$overfit_features" --output "$overfit_output"
+    --module scripts.overfit --config "$overfit_config" --features "$overfit_features" --output "$overfit_output"
 echo "Overfit training and decoded comparisons complete."

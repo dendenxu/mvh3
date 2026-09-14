@@ -1,34 +1,30 @@
 #!/usr/bin/env python3
 """Overfit the full released H3 on fixed real documents with held-out noise."""
 
-import argparse
-import hashlib
+import os
 import json
 import math
-import os
-import shutil
 import time
+import shutil
+import hashlib
+import argparse
 from pathlib import Path
 
-# Resolve the existing environment before importing Torch or repository modules.
-import runtime_env  # noqa: F401; isort: skip
-
-# isort: split
 import torch
 import torch.distributed as dist
 from omegaconf import OmegaConf
 
-from h3.distributed.fsdp import compile_blocks, wrap_model
-from h3.modules.model import MiniMaxH3Transformer3DModel
-from model.diffusion import DiffusionObjective
-from pipeline.chunked_inference import generate
-from trainer.diffusion import parameter_groups
-from utils import distributed as groups
-from utils.checkpoint import load_checkpoint, restore_rng, rng_state, save_checkpoint
-from utils.config import load_config, recipe_digest, validate_config
-from utils.distributed import canonical_name
 from utils.ema import ShardedEMA
 from utils.tracking import Tracker
+from utils import distributed as groups
+from utils.distributed import canonical_name
+from model.diffusion import DiffusionObjective
+from trainer.diffusion import parameter_groups
+from pipeline.chunked_inference import generate
+from h3.modules.model import MiniMaxH3Transformer3DModel
+from h3.distributed.fsdp import wrap_model, compile_blocks
+from utils.config import load_config, recipe_digest, validate_config
+from utils.checkpoint import rng_state, restore_rng, load_checkpoint, save_checkpoint
 
 
 def sampled_weights(model, trainable):
@@ -210,7 +206,7 @@ def main():
     cfg = validate_config(load_config(args.config, args.opts))
     if cfg.resampling_forcing and cfg.max_iters > cfg.resampling_forcing_warmup_steps:
         raise ValueError(
-            "Use the production Trainer for RF continuation; this fixed-source probe ends during warmup"
+            "Use the production Trainer for resampling forcing continuation; this fixed-source probe ends during warmup"
         )
     cfg.h3.logdir = str(args.output)
     resume = cfg.resume_ckpt
@@ -400,6 +396,7 @@ def main():
                 previous_ema = report["evaluations"][-1]["ema_mean_loss"]
                 ema_error = abs(repeated_ema["mean_loss"] - previous_ema) / max(previous_ema, 1e-12)
             decision = resume_evaluation_decision(relative_error, ema_error, diagnostic_reason, exact_checks)
+
             # Preserve strict acceptance separately from this bounded convergence experiment.
             continuation = torch.tensor(int(decision["continue_training"]), device=device)
             dist.all_reduce(continuation, op=dist.ReduceOp.MIN)
@@ -451,6 +448,7 @@ def main():
         model.train()
         for step in range(first_step, cfg.max_iters):
             started = time.monotonic()
+
             # A disjoint seed stream makes evaluation repeatable without ever
             # training on its Gaussian noise or changing future training draws.
             torch.manual_seed(cfg.seed + step)

@@ -4,13 +4,13 @@
 
 import math
 import warnings
-from typing import List, Optional, Tuple, Union
+from typing import List, Tuple, Union, Optional
 
-import numpy as np
 import torch
+import numpy as np
 
-from h3.scheduler import MiniMaxH3SchedulerOutput as SchedulerOutput
 from utils.config import model_config
+from h3.scheduler import MiniMaxH3SchedulerOutput as SchedulerOutput
 
 
 def deprecate(name, version, message, **kwargs):
@@ -100,6 +100,7 @@ class FlowUniPCMultistepScheduler:
                 raise NotImplementedError(f"{solver_type} is not implemented for {self.__class__}")
 
         self.predict_x0 = predict_x0
+
         # setable values
         self.num_inference_steps = None
         alphas = np.linspace(1, 1 / num_train_timesteps, num_train_timesteps)[::-1].copy()
@@ -436,6 +437,7 @@ class FlowUniPCMultistepScheduler:
 
         if len(D1s) > 0:
             D1s = torch.stack(D1s, dim=1)  # (B, K)
+
             # for order 2, we use a simplified version
             if order == 2:
                 rhos_p = torch.as_tensor([0.5], dtype=x.dtype).to(device, non_blocking=True)

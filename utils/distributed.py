@@ -166,6 +166,7 @@ def get_local_rank() -> int:
     NOTE: The modulo fallback assumes a homogeneous cluster with node-contiguous
     rank assignment where every node has the same number of GPUs.
     """
+
     # Preferred: authoritative launcher-provided local rank.
     if "LOCAL_RANK" in os.environ:
         return int(os.environ["LOCAL_RANK"])
@@ -211,6 +212,7 @@ def all_to_all_impl(x: torch.Tensor, scatter_dim: int, gather_dim: int) -> torch
         outputs = [torch.empty_like(u) for u in inputs]
         dist.all_to_all(outputs, inputs, group=get_sp_group())
         return torch.cat(outputs, dim=gather_dim).contiguous()
+
     # sp_size=1: custom_op forbids output aliasing input, so clone.
     return x.clone()
 
@@ -239,6 +241,7 @@ def all_to_all_fake(x: torch.Tensor, scatter_dim: int, gather_dim: int) -> torch
 
 def all_to_all_backward(ctx, grad_output):
     scatter_dim, gather_dim = ctx.scatter_dim, ctx.gather_dim
+
     # backward of all_to_all is all_to_all with swapped dims
     return all_to_all_op(grad_output, gather_dim, scatter_dim), None, None
 
@@ -259,6 +262,7 @@ def all_gather_op(tensor: torch.Tensor, dim: int) -> torch.Tensor:
         tensor_list = [torch.empty_like(tensor) for _ in range(sp_size)]
         dist.all_gather(tensor_list, tensor, group=get_sp_group())
         return torch.cat(tensor_list, dim=dim).contiguous()
+
     # sp_size=1: custom_op forbids output aliasing input, so clone.
     return tensor.clone()
 
@@ -274,6 +278,7 @@ def all_gather_fake(tensor: torch.Tensor, dim: int) -> torch.Tensor:
 def all_gather_backward(ctx, grad_output):
     dim = ctx.dim
     sp_size = get_sp_size()
+
     # backward of all_gather is reduce_scatter
     grad_outputs_list = list(grad_output.chunk(sp_size, dim=dim))
     grad_input = torch.empty_like(grad_outputs_list[0])
@@ -415,6 +420,7 @@ def launch_distributed_job(backend: str = "nccl", sp_size_arg=1, fs_size_arg=1, 
     # Init fsdp device mesh
     global device_mesh, fs_size
     fs_size = min(fs_size_arg, world_size)
+
     # A single shard group has no replication axis. Avoid creating unused
     # singleton NCCL communicators. The one-group FULL_SHARD reduction is
     # numerically equivalent to HYBRID_SHARD with a replication dimension of 1.

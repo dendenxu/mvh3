@@ -1,11 +1,11 @@
 from omegaconf import OmegaConf
 
-from dataset.aggregator import DatasetAggregator
-from dataset.dynamic import DynamicDataset, StaticDynamicDataset
-from dataset.multiview import MultiViewRealDataset
-from dataset.mvgame import MultiViewDataset
-from dataset.presampled import PresampledDataset
 from dataset.static import StaticDataset
+from dataset.mvgame import MultiViewDataset
+from dataset.aggregator import DatasetAggregator
+from dataset.presampled import PresampledDataset
+from dataset.multiview import MultiViewRealDataset
+from dataset.dynamic import DynamicDataset, StaticDynamicDataset
 
 DATASET_REGISTRY = {
     "mvgame": MultiViewDataset,
@@ -34,6 +34,7 @@ def create_dataset(dataset_cfg, config):
     if dtype == "concat":
         sub_cfgs = cfg.pop("datasets")
         weights = cfg.pop("weights", None)
+
         # Shared fields (height, width, num_workers, etc.) from parent config
         # are inherited by sub-datasets. num_workers in particular needs to
         # flow into each sub-dataset so its __init__ preload matches what the

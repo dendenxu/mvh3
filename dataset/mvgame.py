@@ -1,30 +1,30 @@
 # Adopted from https://github.com/guandeh17/Self-Forcing
 # SPDX-License-Identifier: Apache-2.0
+import os
 import json
 import math
-import os
-import random
 import time
+import random
 from functools import partial
-from os.path import basename, dirname, isabs, join, splitext
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union, Optional
+from os.path import join, isabs, dirname, basename, splitext
 
+import torch
 import numpy as np
 import pyarrow.parquet as pq
-import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, get_worker_info
 
-from dataset.fps_remap import resolve_fps_remap
-from utils.base_utils import dotdict
-from utils.camera_io import read_camera_minimal
-from utils.console import blue, cyan, green, log, red, stacktrace, yellow
-from utils.distributed import get_rank, get_world_size, is_main_process, is_node_main
-from utils.math_utils import affine_inverse, affine_padding, ixt_inverse, ixt_padding
-from utils.mvgame import apply_view_chaos, build_main_walk, compute_view_offsets, draw_view_acc_abs
-from utils.parallel import parallel_execution
 from utils.random import set_seed
+from utils.base_utils import dotdict
 from utils.video import CFRVideoReader
+from utils.parallel import parallel_execution
+from dataset.fps_remap import resolve_fps_remap
+from utils.camera_io import read_camera_minimal
+from utils.console import log, red, blue, cyan, green, yellow, stacktrace
+from utils.distributed import get_rank, is_node_main, get_world_size, is_main_process
+from utils.math_utils import ixt_inverse, ixt_padding, affine_inverse, affine_padding
+from utils.mvgame import build_main_walk, apply_view_chaos, draw_view_acc_abs, compute_view_offsets
 
 
 def random_move(
@@ -56,6 +56,7 @@ def random_move(
     1. Randomly select a starting view, if fps can be negative, also randomly select a starting frame.
     2. Randomly select the next frame index, view index, constrained by the view acceleration and view velocity.
     """
+
     # Fast path: C++ extension (Torch JIT extension) that runs this loop with the GIL released.
     # For maximal speed, request return_numpy=True to avoid Python tuple construction.
     try:
@@ -267,6 +268,7 @@ def smooth_aug_path(mi, ma, power=1.0, *, length, acc=0.5, base=100, device=None
         seed=np.random.randint(1e9),
     )
     path = path[:, 0].astype(np.float32)
+
     # random_move wraps the view index modulo base, producing a sawtooth with
     # ±base discontinuities. Undo the wrap into a continuous triangle path: a step
     # of magnitude > base/2 is a wraparound, not real motion; `flips` toggles parity
@@ -276,6 +278,7 @@ def smooth_aug_path(mi, ma, power=1.0, *, length, acc=0.5, base=100, device=None
     mask = np.abs(diffs) > base / 2
     flips = np.cumsum(mask) % 2
     path_continuous = np.where(flips == 1, base - path, path)
+
     # Map continuous [0, base] -> t in [-1, 1] centered at base/2, apply an odd power
     # curve (sign-preserving |t|**power: power>1 eases toward the center value,
     # power<1 pushes toward the extremes), then remap [-1, 1] -> [0, 1] -> [mi, ma].
@@ -584,6 +587,7 @@ def compute_sequence_gamma(
             view_sf_inds = (
                 view_indices[view_sf_pos, 1] if view_indices.ndim == 2 else view_indices[view_sf_pos]
             ).astype(int)
+
         # Quick decode at small resolution (ratio=0.1 like aug_views.py).
         sampled = np.asarray(vrs[int(sv)].get_batch(view_sf_inds, ratio=0.1)).astype(np.float32) / 255.0
         pooled.append((sampled @ LUMA_BT601).ravel() if band.get("use_luma", True) else sampled.ravel())
@@ -660,12 +664,12 @@ def image_augmentation(frames: torch.Tensor) -> torch.Tensor:
     import math
 
     import torch.nn.functional as F
-    import torchvision.transforms.functional as TF
+    import torchvision.transforms.functional as image_transforms
 
     sigma = float(np.random.uniform(0.0, 0.6))
     if sigma > 0.05:
         ks = 2 * int(np.ceil(3 * sigma)) + 1
-        frames = TF.gaussian_blur(frames, kernel_size=ks, sigma=sigma)
+        frames = image_transforms.gaussian_blur(frames, kernel_size=ks, sigma=sigma)
 
     brightness = float(np.random.uniform(0.9, 1.1))
     contrast = float(np.random.uniform(0.9, 1.1))
@@ -765,6 +769,7 @@ def finish_posed_video(
     load_constructed_video (or pre-decoded numpy frames); `cameras` a per-frame list
     of {K,R,T} (w2c). Factored out verbatim so the spec-driven loader stays
     caption<->pixel aligned."""
+
     # Convert to torch tensor with [0, 1] range and permute to F, C, H, W
     frames = torch.stack([torch.as_tensor(f, dtype=torch.float32) for f in frames])
     frames = frames.permute(0, 3, 1, 2)
@@ -907,6 +912,7 @@ def select_pose_stable_factor(centers, factors, target=1.58):
     n = centers.shape[0] if centers.ndim >= 1 else 0
     if n < 2:
         return (float(factors[0]) if factors else 1.0), 0.0
+
     # Max pairwise distance (translation-invariant). N = F*mv is small (~100-300).
     # float64: raw absolute coords can be ~1000s (mvgame game-world), and float32
     # cdist loses the small relative spread to catastrophic cancellation at that
@@ -915,6 +921,7 @@ def select_pose_stable_factor(centers, factors, target=1.58):
     max_t = float(torch.cdist(c, c).amax().item())
     if len(factors) == 1:
         return float(factors[0]), max_t
+
     # Center the post-division band on `target`: factor closest to max_t/target -> post-div
     # in [target/sqrt10, target*sqrt10] (always 10x wide). psf stays in `factors`, so
     # scale_tokens=log(psf) vocabulary is unchanged.
@@ -942,6 +949,7 @@ def normalize_cam_translation(cams, target: float = 1.0):
     if isinstance(cams, dict):
         # Aggregated format: R=[V,F,3,3], T=[V,F,3,1]
         R, T = cams["R"], cams["T"]
+
         # C = -R^T @ T, using einsum for batched transpose-matmul
         C = -np.einsum("...ji,...jk->...ik", R, T)  # [..., 3, 1]
         max_val = np.abs(C).max()
@@ -1257,6 +1265,7 @@ class MultiViewDataset(Dataset):
             mv in pack_factory
         ), f"We only support {list(pack_factory.keys())} packing for now, but got {mv}"
         pack = pack_factory[mv]
+
         # After extracting shape from the given pack ratios, make sure the new size is divisible by 16
         assert (self.height * pack["rs"] % 16 == 0).all(), "Packed sizes must be divisible by 16"
         assert (self.width * pack["rs"] % 16 == 0).all(), "Packed sizes must be divisible by 16"
@@ -1304,6 +1313,7 @@ class MultiViewDataset(Dataset):
                 self.metadata = [json.loads(line) for line in f if line.strip()]
         elif data_path.endswith(".parquet"):
             pf = pq.ParquetFile(data_path)
+
             # Read metadata WITHOUT the pose column to avoid pyarrow int32
             # list-index overflow on large multi-cam parquets (38k rows ×
             # 125k floats/row > 2^31). Pose is loaded lazily per-row in
@@ -1326,6 +1336,7 @@ class MultiViewDataset(Dataset):
             raise NotImplementedError(f"Unrecognized metadata type for file: {data_path}")
 
         n_total = len(self.metadata)
+
         # Tag each meta with its original parquet row index (parity with
         # static.py / multiview.py) so the vis meta panel can show which row a
         # sample came from. Tag the full list before slicing so the index is the
@@ -1520,6 +1531,7 @@ class MultiViewDataset(Dataset):
             return 0
         tfs = self.gen_size * self.vae_stride_t - 3
         default_fps = self.dataset_fps if self.dataset_fps else self.model_fps
+
         # Sampling-weight multiplier ONLY (feeds effective_samples below). Keep at
         # the tuned 25 — do NOT bump to match how many views shape_pool can draw.
         # The view-draw capability (drawing up to 100/110 views per scene) is
@@ -1606,6 +1618,7 @@ class MultiViewDataset(Dataset):
             # present — mirrors svreal static/dynamic convention. Used e.g. to tag
             # watch_dogs_legion as 32fps while other mvgame rows stay at 25fps.
             row_src_fps = meta.get("fps") or self.dataset_fps
+
             # Snap (model_fps, source_fps) to a clean ratio via the remap factory:
             # e.g. (16, 25) → (16, 24) → ratio 1.5 (period-2 alternating Δf instead of
             # the chaotic period-16 pattern from raw 25/16=1.5625). See dataset/fps_remap.py.
@@ -1623,6 +1636,7 @@ class MultiViewDataset(Dataset):
             total_latent_size = (
                 self.gen_size
             )  # In training, we use gen_size as the total latent sequence length
+
             # Wan's causal video VAE maps L latent frames to (L-1)*vae_stride_t + 1
             # pixel frames (first frame coded alone, then groups of vae_stride_t).
             # That equals L*vae_stride_t - (vae_stride_t - 1); with vae_stride_t=4
@@ -1636,6 +1650,7 @@ class MultiViewDataset(Dataset):
                 break
 
             retry_count += 1
+
             # Re-pick a new shape from shape_pool on every miss; if shape_pool is
             # inactive maybe_pick_shape is a no-op and we just advance idx.
             old_mv, old_gen = self.mv_size, self.gen_size
@@ -1682,8 +1697,10 @@ class MultiViewDataset(Dataset):
         n_frames = len(indices)
         mv = self.mv_size
         batch = {"cpu": {}}
+
         # Basic batch misc info
         batch["mv"] = mv
+
         # These are things we want to keep on the cpu
         batch["cpu"]["seed"] = int(seed)
         batch["cpu"]["prompts"] = prompts
@@ -1691,6 +1708,7 @@ class MultiViewDataset(Dataset):
         batch["cpu"]["parquet"] = basename(self.data_path)
         batch["cpu"]["indices"] = indices
         batch["cpu"]["video_path"] = meta["video_path"]
+
         # Row + source-frame span surfaced on the vis meta panel (parity with
         # static/multiview/dynamic). indices[:, 1] is the source frame column
         # (post fps-remap + frame_start); mv chaos only perturbs the view column
@@ -1698,6 +1716,7 @@ class MultiViewDataset(Dataset):
         batch["cpu"]["rows"] = np.asarray([int(meta.get("pose_idx", -1))], dtype=np.int64)
         batch["cpu"]["start_frames"] = np.asarray([int(indices[:, 1].min())], dtype=np.int64)
         batch["cpu"]["end_frames"] = np.asarray([int(indices[:, 1].max())], dtype=np.int64)
+
         # Effective post-subsample fps (matches static.py / dynamic.py convention).
         # The remap factory has already chosen a clean (eff_model, snapped_src)
         # pair, so we report the eff_model as what the model "sees" — for some
@@ -1798,6 +1817,7 @@ class MultiViewDataset(Dataset):
 
         # Regular info
         batch["frames"] = frames  # F, 3, H, 2W, packed
+
         # Normally the camera parameters should be considered metadata, but since we want to move them to the gpu, we keep them raw
 
         batch["projs"] = torch.stack(projs, dim=1).reshape(-1, 4, 4)  # F8, 4, 4
@@ -1836,6 +1856,7 @@ class MultiViewDataset(Dataset):
         Internal helper: creates an infinite, shuffling iterator for the current worker.
         This simulates an IterableDataset behavior within a Map-style dataset.
         """
+
         # Ensure metadata is loaded for this worker
         self.init_loader()
         indices = np.arange(len(self.sharded_metadata))

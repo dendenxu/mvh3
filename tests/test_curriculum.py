@@ -3,7 +3,7 @@ from pathlib import Path
 import torch
 
 from dataset.loader import source_documents
-from h3.modules.masking import CLEAN, CONDITION, NOISY, TokenLayout
+from h3.modules.masking import CLEAN, NOISY, CONDITION, TokenLayout
 
 
 def test_all_views_and_tails_retained(monkeypatch):

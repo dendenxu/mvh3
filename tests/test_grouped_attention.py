@@ -1,11 +1,11 @@
 import itertools
 
-import pytest
 import torch
+import pytest
 from torch.nn.functional import scaled_dot_product_attention
 
-from h3.modules.grouped_attention import visibility_groups
 from h3.modules.masking import CONDITION, TokenLayout
+from h3.modules.grouped_attention import visibility_groups
 
 
 def make_layout(joint, cross_view, history, dropped, padded):

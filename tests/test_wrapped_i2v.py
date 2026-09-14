@@ -1,12 +1,12 @@
 import copy
 
-import pytest
 import torch
+import pytest
 from fixtures_h3 import tiny_model
-from test_native_flow import conditioned_document, native_recipe
+from test_native_flow import native_recipe, conditioned_document
 
-from h3.modules.camera import camera_projection
 from model.diffusion import DiffusionObjective
+from h3.modules.camera import camera_projection
 from pipeline.full_sequence_inference import joint_inputs
 
 

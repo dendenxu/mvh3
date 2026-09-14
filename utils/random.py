@@ -2,11 +2,11 @@
 """Generator-aware normal sampling used by the native VAE and flow solvers."""
 from __future__ import annotations
 
-import logging
 import random
+import logging
 
-import numpy as np
 import torch
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,7 @@ def randn_tensor(
     passing a list of generators, you can seed each batch size individually. If CPU generators are passed, the tensor
     is always created on the CPU.
     """
+
     # device on which tensor is created defaults to device
     if isinstance(device, str):
         device = torch.device(device)

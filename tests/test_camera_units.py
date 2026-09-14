@@ -1,12 +1,12 @@
 import copy
 from pathlib import Path
 
-import numpy as np
-import pytest
 import torch
+import pytest
+import numpy as np
 from PIL import Image
-from test_native_flow import conditioned_document
 from test_worldviews import recipe
+from test_native_flow import conditioned_document
 
 from h3.data import temporal_layout
 from model.diffusion import DiffusionObjective

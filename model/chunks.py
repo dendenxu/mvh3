@@ -1,4 +1,4 @@
-"""Plan BD blocks from source-caption windows or native H3 latent counts."""
+"""Plan diffusion blocks from source-caption windows or native H3 latent counts."""
 
 import torch
 
@@ -42,10 +42,11 @@ def group_partition(count, minimum, maximum):
 
 
 def native_partition(length, requested, minimum, maximum):
-    """Cover every latent, keeping decoder support in the last real BD block."""
+    """Cover every latent, keeping decoder support in the last real diffusion block."""
     if length < minimum:
         return torch.zeros(length, dtype=torch.long)
     final_minimum = max(minimum, length - requested + 1)
+
     # Work backward to rule out draws that would leave an impossible remainder.
     # The last block must contain a requested latent plus all decoder support.
     possible = [False] * (length + 1)
@@ -109,7 +110,7 @@ def joint_native_partition(views, minimum, maximum):
 def prepare_chunk_plan(document, cfg, device, synchronize=True):
     """Choose latent blocks before captions and the clean/noisy cut are chosen.
 
-    A saved plan is validated and reused, so RF and checkpoint resume cannot
+    A saved plan is validated and reused, so resampling forcing and checkpoint resume cannot
     silently move a caption or change the block currently being predicted.
     """
     native = cfg.h3.get("chunk_size_range") is not None
@@ -142,7 +143,7 @@ def prepare_chunk_plan(document, cfg, device, synchronize=True):
                 ).flatten()
                 mapping = plan[starts]
                 if not torch.equal(mapping[source], plan):
-                    raise ValueError("A BD block cannot split an original caption chunk")
+                    raise ValueError("A diffusion block cannot split an original caption chunk")
             counts = torch.bincount(mapping)
             if (
                 (counts > maximum).any()
@@ -192,7 +193,7 @@ def prepare_chunk_plan(document, cfg, device, synchronize=True):
 
 
 def prepare_clean_prefix(document, cfg, device):
-    """Draw one cut per sequence, retaining at least one supervised BD block."""
+    """Draw one cut per sequence, retaining at least one supervised diffusion block."""
     views = document["views"]
     counts = [int(view["generation_chunks"].cpu()[view["valid"].cpu()].max()) + 1 for view in views]
     present = ["clean_prefix_chunks" in view for view in views]
@@ -224,7 +225,7 @@ def prepare_clean_prefix(document, cfg, device):
 
 
 def caption_chunk(view, caption_id, source_chunk_size):
-    """Retain each source caption and assign it to its enclosing BD block."""
+    """Retain each source caption and assign it to its enclosing diffusion block."""
     if caption_id < 0 or "generation_chunks" not in view or view.get("texts_by_bd", False):
         return caption_id
     indices = torch.nonzero(source_chunk_ids(view, source_chunk_size) == caption_id).flatten()

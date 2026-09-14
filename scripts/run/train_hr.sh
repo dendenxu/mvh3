@@ -7,10 +7,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 source "${MVH3_RUNTIME_ENV:-local/h3_experiment_env.sh}"
 mvh3_python="${MVH3_PYTHON:-python}"
 # Fresh HR nodes activate WorldViews under /home/tiger before a shm copy exists.
-# The runtime verifier below must accept whichever existing interpreter is used.
+# Record whichever existing interpreter this worker uses.
 if ! command -v "$mvh3_python" >/dev/null 2>&1; then
     mvh3_python="$(command -v python)"
 fi
+mvh3_python="$(command -v "$mvh3_python")"
+export PATH="$(dirname "$mvh3_python"):$PATH"
 : "${MVH3_CHECKPOINT:?Set the original FL2VA checkpoint}"
 : "${MVH3_VAE:?Set the native video VAE}"
 : "${MVH3_DATA_ROOT:?Set the paired data root}"
@@ -26,7 +28,7 @@ export PYTHONUNBUFFERED=1 TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
 unset GIT_DIR GIT_WORK_TREE http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 mvh3_run="${MVH3_RUN_DIR:-local/production64_${ARNOLD_MONITOR_TRIAL_ID}}"
 mvh3_config="${MVH3_TRAIN_CONFIG:-configs/diffusion_forcing.yaml}"
-"$mvh3_python" scripts/runtime_env.py \
+"$mvh3_python" -m scripts.environment_report \
   --reference "${MVH3_FA4_REFERENCE:-local/attention_native_reference_v2/fa4_source_receipt.json}" \
   --output "$mvh3_run/runtime_node${ARNOLD_ID}.json"
 

@@ -29,8 +29,8 @@ Value: (effective_model_fps, snapped_source_fps).
 
 from __future__ import annotations
 
-from fractions import Fraction
 from typing import Tuple
+from fractions import Fraction
 
 from utils.console import warn_once
 
@@ -103,13 +103,16 @@ def resolve_fps_remap(model_fps: int, source_fps) -> Tuple[int, int]:
     if source_fps in table:
         return table[source_fps]
     src = float(source_fps)
+
     # Clean small-q sources need no remap — pass through (preserves 16/24/32/48/64).
     if is_clean_ratio(src, float(model_fps)):
         return model_fps, source_fps
+
     # Chaotic source: snap to the proportionally-nearest registered rate, if in band.
     nearest_key = min(table.keys(), key=lambda k: abs(src / float(k) - 1.0))
     if abs(src / float(nearest_key) - 1.0) <= FPS_MATCH_TOLERANCE_FRAC:
         return table[nearest_key]
+
     # Fallthrough: nearest standard is >FRAC away and ratio is chaotic → warn once.
     warn_once(
         f"[fps_remap] unknown (model_fps={model_fps}, "

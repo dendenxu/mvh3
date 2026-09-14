@@ -115,6 +115,7 @@ def grouped_backward(
     )
     full_q = torch.empty_like(dq).index_copy_(0, q_indices, dq)
     restored = [full_q]
+
     # KV can occur in several groups. Sum in FP32 before the final BF16 cast.
     for gradient in (dk, dv):
         full = torch.zeros(batch * size, heads, dim, device=query.device, dtype=torch.float32)
@@ -158,6 +159,7 @@ class GroupedFlexAttention(torch.autograd.Function):
             kernel_options={"BACKEND": "FLASH"},
             return_aux=AuxRequest(lse=True),
         )
+
         # The pinned Torch FLASH template writes native ln-LSE; public flex
         # still applies its log2-to-ln conversion. Undo it for native backward.
         native_lse = auxiliary.lse / math.log(2.0)

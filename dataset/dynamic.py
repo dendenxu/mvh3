@@ -16,27 +16,27 @@
 
 import os
 import random
-from os.path import basename, isabs, isdir, isfile, join
 from typing import List
+from os.path import join, isabs, isdir, isfile, basename
 
-import numpy as np
 import torch
+import numpy as np
 from torch.utils.data import get_worker_info
 
-from dataset.fps_remap import resolve_fps_remap
-from dataset.mvgame import (
-    LOOSE_EXPOSURE_BAND,
-    compute_sequence_gamma,
-    make_strip_pack,
-    normalize_cam_translation,
-    pack_factory,
-    select_pose_stable_factor,
-)
-from dataset.static import StaticDataset, parse_pose_column
-from utils.console import green, log, red, stacktrace, yellow
-from utils.distributed import get_rank, is_node_main
 from utils.random import set_seed
 from utils.video import TorchCodecVideoReader
+from dataset.fps_remap import resolve_fps_remap
+from utils.distributed import get_rank, is_node_main
+from dataset.static import StaticDataset, parse_pose_column
+from utils.console import log, red, green, yellow, stacktrace
+from dataset.mvgame import (
+    pack_factory,
+    make_strip_pack,
+    LOOSE_EXPOSURE_BAND,
+    compute_sequence_gamma,
+    normalize_cam_translation,
+    select_pose_stable_factor,
+)
 
 
 class DynamicDataset(StaticDataset):
@@ -62,14 +62,16 @@ class DynamicDataset(StaticDataset):
         self.fps_targets = fps_targets  # explicit fps target list, e.g. [16]; None = default graded fallback
         self.dynamic_gen_size = dynamic_gen_size  # gen_size used in dynamic path (falling back from static); 0 = use self.gen_size
         self.dynamic_mv_size = dynamic_mv_size  # mv_size used in dynamic path (falling back from static); None = use self.mv_size
+
         # short_paths: list of (mv, gen_size) tuples, tried as a graded
         # rescue chain when the main multi-video path can't pick `mv_size`
         # videos at `dynamic_gen_size`. e.g. [[4, 20], [10, 10]] tries
         # mv=4 gen=20 first (longer per-video), then mv=10 gen=10 (shortest).
         # Each entry must satisfy gen_size >= 2*chunk_size to keep teacher
-        # forcing's context_size > 0; gen_size == chunk_size degenerates TF
+        # forcing's context_size > 0; gen_size == chunk_size degenerates teacher forcing
         # to "no context" which mismatches inference.
         self.short_paths = [tuple(p) for p in (short_paths or [])]
+
         # Pure DynamicDataset has only one path, so dynamic_gen_size (if set)
         # IS the gen_size. Inject into kwargs BEFORE super().__init__ so
         # StaticDataset's is_sample_viable filter sees the runtime gen_size —
@@ -88,6 +90,7 @@ class DynamicDataset(StaticDataset):
         self.eff_gen_size = kwargs.get("gen_size")
         if type(self) is DynamicDataset and dynamic_gen_size:
             kwargs["gen_size"] = dynamic_gen_size
+
         # Same for mv: pure DynamicDataset's single path uses dynamic_mv_size AS
         # the mv_size (e.g. mv=1 long single-view main at dynamic_gen_size, then
         # laddering down through short_paths as the anchor gets shorter). Falls
@@ -97,6 +100,7 @@ class DynamicDataset(StaticDataset):
         if type(self) is DynamicDataset and dynamic_mv_size is not None:
             kwargs["mv_size"] = dynamic_mv_size
         super().__init__(*args, **kwargs)
+
         # Path-keyed video reader cache (since each getitem accesses arbitrary rows,
         # not the per-shard fixed set that StaticDataset assumes).
         self.dyn_video_readers = {}
@@ -133,6 +137,7 @@ class DynamicDataset(StaticDataset):
         Returns 0 when empty after prefilter so the aggregator drops it."""
         if not self.metadata:
             return 0
+
         # Use the config (pre-swap) gen_size as the common weighting unit, NOT
         # self.gen_size: for a pure DynamicDataset self.gen_size was swapped to
         # dynamic_gen_size in __init__, which would penalize it ~2.2x vs the
@@ -162,6 +167,7 @@ class DynamicDataset(StaticDataset):
                 video_file = join(abs_path, video_files[0])
             else:
                 raise FileNotFoundError(f"Video path not found: {abs_path}")
+
             # Construct via the config-selected reader class inherited from
             # StaticDataset.__init__ (`video_reader` cfg → TorchCodecVideoReader
             # or CFRVideoReader), NOT the TorchCodecVideoReader imported above —
@@ -192,6 +198,7 @@ class DynamicDataset(StaticDataset):
         The last two return values (resolved path + source seg_start) are what
         the sidecar needs to reproduce this view later.
         """
+
         # Resolve path & get reader
         video_path = self.resolve_video_path(meta_row["video_path"])
         vr = self.get_video_reader_for_path(video_path)
@@ -200,6 +207,7 @@ class DynamicDataset(StaticDataset):
         pose_idx = meta_row["pose_idx"]
         if pose_idx not in self.camera_params:
             self.load_poses([pose_idx])
+
         # camera_params stores raw flat array; parse + normalize on access
         pose_flat = self.camera_params[pose_idx]
         cameras = parse_pose_column(pose_flat)
@@ -236,6 +244,7 @@ class DynamicDataset(StaticDataset):
         # fps-subsample it down to total_frame_size output frames.
         max_start = n_frames_src - src_frame_size
         seg_start = random.randint(0, max_start) if max_start > 0 else 0
+
         # Output frame i maps to source offset round(i * fps_ratio) within the
         # window. fps_ratio == 1.0 → identity (no subsample); fps_ratio > 1.0 →
         # stride > 1 (e.g. 60fps source → 15fps model, ratio 4, every 4th frame).
@@ -250,6 +259,7 @@ class DynamicDataset(StaticDataset):
             np.round(model_idx * fps_ratio).astype(np.int64),
             src_frame_size - 1,
         )
+
         # Add window base (seg_start) and parquet window offset (frame_start) to
         # land in absolute source-mp4 frame space for vr.get_batch.
         seg_frame_inds = (seg_start + frame_start) + src_offsets
@@ -318,6 +328,7 @@ class DynamicDataset(StaticDataset):
         target_w = int(self.width * pack["rs"][0])
 
         src_fps = float(anchor_meta.get("fps", self.model_fps))
+
         # Factory-snapped primary tier; native fps fallback only allowed in
         # graded mode (self.fps_targets is None — used by StaticDynamicDataset's
         # dynamic fallback). Strict mode (fps_targets=[16] for pure
@@ -359,6 +370,7 @@ class DynamicDataset(StaticDataset):
         batch = {"cpu": {}}
         batch["mv"] = 1
         batch["cpu"]["prompts"] = caption
+
         # Single view: scalar `video_path` is canonical; build_meta_dicts and the
         # error logs fall back to it, so no redundant (and default_collate-
         # transposed) `video_paths` list here. The view_as_batch path keeps
@@ -376,6 +388,7 @@ class DynamicDataset(StaticDataset):
 
         # NOT setting view_isolated: mv=1 collapses to the standard path.
         batch["frames"] = view_data["frames"]  # [F, 3, H, W]
+
         # mv=1 stack-and-reshape is a no-op shape-wise; keep the form for
         # symmetry with multi-view batches.
         batch["projs"] = torch.stack([view_data["projs"]], dim=1).reshape(-1, 4, 4)
@@ -492,6 +505,7 @@ class DynamicDataset(StaticDataset):
             random.shuffle(row_pool)
         picked = 0
         attempts = 0
+
         # Budget = 20 row tries per requested view. Each attempt either fills a
         # slot or rejects a row (too short / load error), so this tolerates a
         # ~95% reject rate before giving up and returning None to the caller
@@ -521,6 +535,7 @@ class DynamicDataset(StaticDataset):
                 meta_row = self.sharded_metadata[row_idx]
 
             src_fps = float(meta_row.get("fps", self.model_fps))
+
             # Factory-snapped primary tier; native fps fallback only allowed in
             # graded mode (fps_targets is None — used by StaticDynamicDataset's
             # dynamic fallback). Strict mode (fps_targets=[16] for pure
@@ -555,6 +570,7 @@ class DynamicDataset(StaticDataset):
                                 f"{meta_row.get('video_path', '?')}: {type(e).__name__}: {e}"
                             )
                         )
+
                     # CAVEAT (2026-05-28 audit): exception logged only for first 3
                     # attempts per anchor; subsequent failures silent. If 100% of
                     # pool fails (broken parquet, missing embeds, codec error), the
@@ -610,11 +626,13 @@ class DynamicDataset(StaticDataset):
         batch = {"cpu": {}}
         batch["cpu"]["video_path"] = video_paths_list[0]
         batch["cpu"]["video_paths"] = list(video_paths_list)
+
         # Per-view parquet (same file for all views). Length-mv so view_as_batch
         # collate folds it sample-major to B*mv (mirrors video_paths) → shows on
         # every view panel. With video_paths, grep the basename to find the row.
         batch["cpu"]["parquets"] = [basename(self.data_path)] * len(video_paths_list)
         batch["cpu"]["start_frames"] = np.asarray(start_frames_list, dtype=np.int64)
+
         # Per-view source-frame end + parquet row (length-mv → view_as_batch
         # collate folds them sample-major to B*mv, one per view panel; in the
         # strip path each view is a DIFFERENT row, unlike static/multiview).
@@ -638,6 +656,7 @@ class DynamicDataset(StaticDataset):
             batch["Rs"] = torch.stack(Rs_list, dim=0)  # [mv, F, 3, 3]
             batch["Ts"] = torch.stack(Ts_list, dim=0)  # [mv, F, 3, 1]
             batch["prompt_embeds"] = torch.stack(embeds_list, dim=0)  # [mv, L, D]
+
             # mv=1 single-view pack — every batch element packs as a single full view.
             mv1_pack = pack_factory[1]
             mv1_pack = {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in mv1_pack.items()}
@@ -751,6 +770,7 @@ class DynamicDataset(StaticDataset):
                     f"exhausted all paths (nf={n_anchor}), advancing idx"
                 )
             )
+
             # CAVEAT (2026-05-28 audit): `idx = local_idx + 1` re-enters the
             # while-loop where `seed = idx // n_meta`. For local_idx + 1 < n_meta
             # this collapses retry seed to 0 regardless of original idx, biasing

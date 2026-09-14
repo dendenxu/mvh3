@@ -1,14 +1,14 @@
 """Atomic distributed checkpoints of original trainable weights and FP32 AdamW."""
 
-import json
 import os
-import random
+import json
 import uuid
-from copy import deepcopy
+import random
 from pathlib import Path
+from copy import deepcopy
 
-import numpy as np
 import torch
+import numpy as np
 import torch.distributed as dist
 
 from utils.config import recipe_digest
@@ -41,6 +41,7 @@ def save_checkpoint(model, optimizer, cfg, step, stage, runtime, directory, ema=
     if ema is not None and (ema.swapped or ema.num_updates != step):
         raise ValueError("Save raw optimizer weights and matching EMA updates outside an EMA swap")
     rank, world = (dist.get_rank(), dist.get_world_size()) if dist.is_initialized() else (0, 1)
+
     # A new generation keeps an interrupted re-save from mixing rank shards
     # with the previously committed checkpoint at the same global step.
     generation = [uuid.uuid4().hex[:12] if rank == 0 else None]
@@ -115,6 +116,7 @@ def load_checkpoint(
     world, rank = (dist.get_world_size(), dist.get_rank()) if dist.is_initialized() else (1, 0)
     if manifest["world_size"] != world:
         raise ValueError("Sharded resume requires the saved world size; consolidate before changing topology")
+
     # Inference reads only the selected weights; avoid eagerly reading the
     # optimizer and queued training data from the same shard file.
     state = torch.load(
@@ -188,6 +190,17 @@ def load_checkpoint(
             p.copy_(selected[name])
     if optimizer is not None:
         optimizer.load_state_dict(state["optimizer"])
+
+    # Older training checkpoints abbreviated these queue fields. Normalize
+    # their names here so the trainer only handles the current state schema.
+    runtime = state["runtime"]
+    for previous, current in (
+        ("pending_rf", "pending_resampling_forcing"),
+        ("depth", "resampling_forcing_depth"),
+    ):
+        if previous in runtime:
+            runtime[current] = runtime.pop(previous)
+
     if restore_random:
         restore_rng(state["rng"])
     return state

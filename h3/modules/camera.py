@@ -7,8 +7,8 @@ must be gathered and interleaved before applying that allocation.
 
 import json
 import math
-from dataclasses import dataclass, fields
 from pathlib import Path
+from dataclasses import fields, dataclass
 
 import torch
 
@@ -16,6 +16,7 @@ FROZEN_BASES = {
     int(order): torch.tensor(values, dtype=torch.float32)
     for order, values in json.loads(Path(__file__).with_name("wigner_bases.json").read_text()).items()
 }
+
 # Five log-spaced frequencies retain the historical 12-frequency range in
 # the existing 30 translation channels, without touching native T or the tail.
 TRANSLATION_FREQUENCIES = tuple(0.01 * 3200.0 ** (index / 4) for index in range(5))
@@ -155,6 +156,7 @@ def precompute_camera(pose_10d: torch.Tensor, reference=None) -> CameraEncoding:
             reference = reference.float()
             ref_rotation = rotvec_to_matrix(reference[..., 4:7])
             rotation = ref_rotation.mT @ rotation
+
             # Exact neutral geometry avoids roundoff in R^T R and frozen bases.
             neutral = (pose == reference).all(-1)
             rotation = torch.where(neutral[..., None, None], torch.eye(3, device=pose.device), rotation)
@@ -167,6 +169,7 @@ def precompute_camera(pose_10d: torch.Tensor, reference=None) -> CameraEncoding:
         frequencies = pose.new_tensor(TRANSLATION_FREQUENCIES)
         translation = pose[..., 7:10, None] * frequencies
         intrinsics = torch.cat((pose[..., :2].log(), pose[..., 2:4]), dim=-1) * 4.0
+
         # H: D1(3) + D2(5) + tx(10) + tz frequency indices {0,2,4}(6) + fx,cx(4).
         # W: D1(3) + D3(7) + ty(10) + tz frequency indices {1,3}(4) + fy,cy(4).
         h_angles = torch.cat(

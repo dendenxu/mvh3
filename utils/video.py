@@ -12,7 +12,7 @@ import os
 import struct
 import subprocess
 from os.path import abspath, dirname
-from typing import Iterable, List, Tuple, Union
+from typing import List, Tuple, Union, Iterable
 
 import av
 import numpy as np
@@ -108,14 +108,17 @@ def read_metadata_from_moov(video_path):
         f.seek(trak_s)
         tkhd_s, _ = find(f, b"tkhd", trak_e)
         f.seek(tkhd_s)
+
         # tkhd is a FullBox: 1-byte version + 3-byte flags lead every such box.
         # The version selects 32- vs 64-bit time fields below.
         ver = struct.unpack("B", f.read(1))[0]
         f.read(3)
+
         # skip creation/modification/track_ID/reserved/duration
         # v0: 4+4+4+4+4 = 20 bytes; v1: 8+8+4+4+8 = 32 bytes.
         f.read(20 if ver == 0 else 32)
         f.read(8 + 2 + 2 + 2 + 2 + 36)  # reserved + layer + group + volume + reserved + matrix
+
         # Track display width/height are 16.16 fixed-point; the integer pixel
         # size is the high 16 bits (the fractional part is unused here).
         w_fixed, h_fixed = struct.unpack(">II", f.read(8))
@@ -151,6 +154,7 @@ def read_metadata_from_moov(video_path):
         stts_s, _ = find(f, b"stts", stbl_e)
         f.seek(stts_s + 4)  # +4: skip the FullBox 1-byte version + 3-byte flags
         (n_stts,) = struct.unpack(">I", f.read(4))
+
         # stts is run-length encoded: n_stts entries of (sample_count,
         # sample_delta), each a big-endian u32 (8 bytes/entry). counts[i] frames
         # share duration deltas[i] ticks. For strict CFR there is usually a
@@ -158,10 +162,11 @@ def read_metadata_from_moov(video_path):
         raw = np.frombuffer(f.read(n_stts * 8), dtype=">u4").reshape(-1, 2)
         counts = raw[:, 0].astype(np.int64)
         deltas = raw[:, 1].astype(np.int64)
+
         # Strip TRAILING zero-duration stts samples before counting frames. A
         # 0-duration final sample is a common muxer/trim artifact (ffmpeg
         # end-of-stream padding): it appears in the stts AND as a packet, but the
-        # decoder never emits it as a frame. raw mvgame GT renders all carry stts
+        # decoder never emits it as a frame. raw mvgame ground truth renders all carry stts
         # [(499, 512), (1, 0)] — 500 samples but only 499 decodable frames (last
         # real PTS 254976, while the phantom sits at 255488 == stream.duration).
         # Counting it makes the reader report len == 500 while get_batch can only
@@ -176,6 +181,7 @@ def read_metadata_from_moov(video_path):
             deltas = deltas[:-1]
         n_stts = len(deltas)
         n_frames = int(counts.sum())
+
         # FPS from the DOMINANT (most-common-by-count) sample delta — i.e. the
         # mode, which equals r_frame_rate / PyAV's stream.base_rate. A
         # count-weighted average is wrong for CFR files whose final sample
@@ -198,8 +204,10 @@ def read_metadata_from_moov(video_path):
         else:
             f.seek(stss_s + 4)  # +4: skip FullBox version + flags
             (n_kf,) = struct.unpack(">I", f.read(4))
+
             # stss lists keyframe SAMPLE NUMBERS (1-indexed); -1 -> 0-indexed.
             kf_samples = np.frombuffer(f.read(n_kf * 4), dtype=">u4").astype(np.int64) - 1
+
             # Convert each keyframe sample index to its PTS by walking the stts
             # run-length table (stts gives durations, not absolute PTS).
             if n_stts == 1:
@@ -302,6 +310,7 @@ class CFRVideoReader:
                 self.time_base = meta["time_base"]
                 self.shape = (meta["n_frames"], meta["height"], meta["width"], c)
                 kf = meta["keyframe_pts"]
+
                 # keyframe_pts is None when stss is absent, i.e. EVERY frame is a
                 # keyframe. Synthesize one PTS per frame on the CFR grid: ticks
                 # per frame = round(1 / (time_base * fps)) = timescale / fps =
@@ -485,6 +494,7 @@ class CFRVideoReader:
             unique_frame_inds, inverse_inds = np.unique(frame_inds, return_inverse=True)
         else:
             unique_frame_inds = frame_inds
+
         # Frame index -> PTS on the CFR grid. fps*time_base = 1/delta, so this
         # is round(idx * delta); the round() lands exactly on the integer tick
         # grid (e.g. multiples of 512) that the `frame.pts in group` test below
@@ -744,6 +754,7 @@ def write_video(filename: str, frames: np.ndarray, **kwargs):
     """
     Optimized bulk video writer.
     """
+
     # 1. Handle Torch Tensors without importing torch globally
     if hasattr(frames, "cpu"):
         frames = frames.cpu().numpy()
@@ -877,6 +888,7 @@ class FFMPEGVideoWriter:
 
     def write_batch(self, frames: np.ndarray):
         """Writes the entire array to ffmpeg in one go."""
+
         # Sanity check
         if frames.ndim != 4:
             raise ValueError(f"Expected (F, H, W, 3), got {frames.shape}")

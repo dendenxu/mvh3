@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from os.path import basename, dirname, join
+from os.path import join, dirname, basename
 
 from torch.utils.cpp_extension import load
 

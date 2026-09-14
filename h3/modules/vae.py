@@ -18,11 +18,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils.config import model_config
 from h3.checkpoint import load_local_model
 from h3.modules.attention import dispatch_attention_fn
 from h3.modules.layers import FeedForward, get_parameter_dtype, set_gradient_checkpointing
-from h3.modules.vae_distribution import AutoencoderKLOutput, DecoderOutput, DiagonalGaussianDistribution
-from utils.config import model_config
+from h3.modules.vae_distribution import DecoderOutput, AutoencoderKLOutput, DiagonalGaussianDistribution
 
 
 class MiniMaxH3VideoCausalConv3d(nn.Conv3d):
@@ -825,6 +825,7 @@ class AutoencoderKLMiniMaxH3(nn.Module):
         `frame_overlap` pixel frames and are linearly cross-faded. Latent frames are repeated at the end when the length is not a whole
         number of chunks; the extra pixel frames are cut off again at the end.
         """
+
         # Single-image conditioning/tails can have fewer than one decode chunk.
         # Reuse the normal overlap path, then keep only their physical frames.
         minimum = self.tokens_chunk_size + self.token_overlap
@@ -894,6 +895,7 @@ class AutoencoderKLMiniMaxH3(nn.Module):
             The latent distribution of the encoded videos. Note that MiniMax-H3 normalizes the sampled latents with
             `latents_mean` / `latents_std` afterwards.
         """
+
         # Every module is pinned to float32 by the released checkpoint dtype policy, so a pipeline running in a lower `torch_dtype`
         # hands over lower-precision pixels; align them with the weights, like the audio autoencoder does.
         x = x.to(get_parameter_dtype(self.encoder))

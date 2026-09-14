@@ -54,6 +54,7 @@ class HistoryCache:
             )
 
         mask = build_block_mask(mask_mod, qn, kn, key.device)
+
         # Copy CPU history directly into its final attention buffer. Moving
         # every segment before cat keeps two full GPU copies alive at once.
         joined_key = key.new_empty(key.shape[0], kn, *key.shape[2:])
@@ -124,6 +125,7 @@ class HistoryCache:
             cut = count - keep
             if keep:
                 resident_layout = self.select_layout(layout, slice(cut, None))
+
                 # Clone a split suffix so its storage cannot retain an offloaded prefix.
                 resident_key = key[:, cut:].contiguous().clone() if cut else key
                 resident_value = value[:, cut:].contiguous().clone() if cut else value
@@ -143,6 +145,7 @@ def make_caches(model, cfg, enabled=True, document=None):
     if not enabled:
         return None
     count = len(model.transformer_blocks)
+
     # The distilled CFG=1 path has only one stream and can use the whole budget.
     streams = 1 if cfg.guidance_scale == 1 else 2
     budget = int(cfg.kv_gpu_budget_gb * 1024**3 / (streams * count))

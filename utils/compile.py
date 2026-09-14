@@ -1,13 +1,13 @@
 """Read and write complete Torch compile-cache snapshots without losing older entries."""
 
 import os
-from collections import defaultdict
 from os.path import dirname
+from collections import defaultdict
 
 import torch
 import torch.utils.checkpoint
-from torch.compiler._cache import CacheArtifactManager, _deserialize_single_cache
 from torch.utils._appending_byte_serializer import AppendingByteSerializer
+from torch.compiler._cache import CacheArtifactManager, _deserialize_single_cache
 
 
 def atomic_write(data, path):
@@ -46,6 +46,7 @@ def snapshot_bytes(union):
     count = sum(len(v) for v in union.values())  # TRUE union size -- the count that matches the written bytes
     M = CacheArtifactManager
     M._serializer.clear()
+
     # Do NOT report torch's CacheInfo count: serialize() does `_cache_info.add(a)` for every _new artifact and
     # NEVER clears _cache_info, then returns a deepcopy of the whole thing. Since each snapshot sets
     # `_new = the full union`, that process-cumulative count grows by |union| on every call (the logs showed

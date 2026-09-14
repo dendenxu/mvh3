@@ -1,19 +1,19 @@
 """Validation video, caption/pose metadata, and asynchronous HDFS mirroring."""
 
-import hashlib
 import json
 import math
-import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import subprocess
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
-import numpy as np
 import torch
+import numpy as np
 
-from h3.encoders import VideoEncoder
 from utils.video import write_video
+from h3.encoders import VideoEncoder
 
 mirror_executor = None
 
@@ -138,6 +138,7 @@ def write_overfit_comparison(cfg, features, run, device="cuda:0"):
     decoder = VideoEncoder(cfg.h3.vae, device)
     directory = run / "review"
     directory.mkdir(parents=True, exist_ok=True)
+
     # Step 2: Decode matching frames and label the side-by-side videos.
     rows = []
     for index, document in enumerate(documents):
@@ -189,6 +190,7 @@ def write_overfit_comparison(cfg, features, run, device="cuda:0"):
         rows.append(row)
         print(json.dumps(row), flush=True)
         del panels, comparison, reference
+
     # Step 3: Record reconstruction metrics and fixed-noise training curves.
     result = dict(
         status="complete",

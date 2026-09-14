@@ -4,38 +4,38 @@
 # StaticDataset (parquet + TorchCodec + lazy pose loading).
 import json
 import math
-import random
 import time
-from os.path import basename, dirname, isabs, isfile, join, splitext
+import random
 from typing import List
+from os.path import join, isabs, isfile, dirname, basename, splitext
 
+import torch
 import numpy as np
 import pyarrow.parquet as pq
-import torch
 from torch.utils.data import Dataset, get_worker_info
 
 import utils.video as video_utils
+from utils.random import set_seed
+from utils.base_utils import dotdict
+from dataset.static import parse_pose_column
+from utils.parallel import parallel_execution
+from utils.video import TorchCodecVideoReader
 from dataset.fps_remap import resolve_fps_remap
+from utils.console import log, red, blue, green, yellow, stacktrace
+from utils.distributed import get_rank, is_node_main, get_world_size
+from utils.math_utils import ixt_inverse, ixt_padding, affine_inverse, affine_padding
 from dataset.mvgame import (
+    pack_factory,
+    gamma_correct,
+    normalize_ixt,
+    make_strip_pack,
+    image_augmentation,
+    video_augmentation,
     LOOSE_EXPOSURE_BAND,
     compute_sequence_gamma,
-    gamma_correct,
-    image_augmentation,
-    make_strip_pack,
     normalize_cam_translation,
-    normalize_ixt,
-    pack_factory,
     select_pose_stable_factor,
-    video_augmentation,
 )
-from dataset.static import parse_pose_column
-from utils.base_utils import dotdict
-from utils.console import blue, green, log, red, stacktrace, yellow
-from utils.distributed import get_rank, get_world_size, is_node_main
-from utils.math_utils import affine_inverse, affine_padding, ixt_inverse, ixt_padding
-from utils.parallel import parallel_execution
-from utils.random import set_seed
-from utils.video import TorchCodecVideoReader
 
 
 def parse_pose_column_egoexo4d(pose_flat: np.ndarray, num_frames_per_cam: List[int]):
@@ -53,6 +53,7 @@ def parse_pose_column_egoexo4d(pose_flat: np.ndarray, num_frames_per_cam: List[i
     Returns: list[n_cams] of list[N_cam_i] of {K, R, T} dicts.
     """
     n_cams = len(num_frames_per_cam)
+
     # Infer max_frames from actual pose size instead of trusting num_frames
     max_nf = pose_flat.size // (n_cams * 10)
     pose_5d = pose_flat[: n_cams * max_nf * 10].reshape(n_cams, max_nf, 10)
@@ -138,6 +139,7 @@ class MultiViewRealDataset(Dataset):
         self.video_path_template = video_path_template
         self.video_reader_cls = getattr(video_utils, video_reader)
         self.pre_resize = pre_resize
+
         # Threaded per-view decode switch (default ON). Distinct per-cam readers are
         # decoded across <=8 threads (parallel_execution) — cuts serial 8-view 720p
         # decode from ~17s to ~3s, and ~5x more at 20 views. The earlier "regression"
@@ -163,6 +165,7 @@ class MultiViewRealDataset(Dataset):
         self.sp_sharding = sp_sharding
         self.per_worker_threads = per_worker_threads
         self.NUM_CAMERAS = num_cameras if num_cameras is not None else mv_size
+
         # If physical cameras are fewer than the requested mv_size, cap mv_size
         # to NUM_CAMERAS — the view loop in getitem_impl iterates `zip(view_to_cam,
         # ratios, ...)` which has length min(NUM_CAMERAS, mv_size). Without this
@@ -182,6 +185,7 @@ class MultiViewRealDataset(Dataset):
         self.max_fov_h_deg = max_fov_h_deg
         self.dataset_fps = dataset_fps
         self.model_fps = model_fps
+
         # Snap (model_fps, dataset_fps) via the fps_remap factory so the per-step
         # frame stride round(i*ratio) lands on a clean p/q (q≤2) pattern instead
         # of chaotic period-q patterns. e.g. (16, 30) → (15, 30) → ratio 2.0.
@@ -419,6 +423,7 @@ class MultiViewRealDataset(Dataset):
             base_dir = meta["video_path"]
             if not isabs(base_dir):
                 base_dir = join(self.data_root, base_dir)
+
             # Per-camera mp4 path; see video_path_template docstring for default.
             self.video_paths[idx] = [
                 join(base_dir, self.video_path_template.format(c=c)) for c in range(self.NUM_CAMERAS)
@@ -537,6 +542,7 @@ class MultiViewRealDataset(Dataset):
         Returns 0 when empty so the aggregator drops the dataset."""
         if not self.metadata:
             return 0
+
         # tfs = pixel frames per training sample (the 4F-3 VAE decode length).
         # Final `/8` is the fixed per-sample normalizer shared by every
         # dataset's effective_samples so DatasetAggregator weights stay
@@ -719,6 +725,7 @@ class MultiViewRealDataset(Dataset):
             n_frames = int(n_frames_src / row_fps_ratio)  # usable length in model-fps frames
 
             total_latent_size = self.gen_size
+
             # Pixel frames a gen_size-latent clip decodes to. VAE temporal conv
             # is causal: F latents → (F-1)*vae_stride_t + 1 frames; with
             # vae_stride_t=4 that is 4F-3, hence the -3.
@@ -827,12 +834,14 @@ class MultiViewRealDataset(Dataset):
         batch["cpu"]["video_path"] = meta["video_path"]
         batch["cpu"]["dataset_name"] = self.dataset_name
         batch["cpu"]["parquet"] = basename(self.data_path)
+
         # Reproduction info: shared time window + per-view camera selection.
         # All views share the same source frame indices; they differ only in
         # which physical camera they read from (view_to_cam is a shuffle of
         # range(NUM_CAMERAS)). Together with video_path + seed these replay
         # the exact sample.
         batch["cpu"]["start_frame"] = int(start_model)
+
         # Row + source-frame span for the vis meta panel (parity with
         # static/mvgame/dynamic). src_idx_abs is the absolute source frame indices
         # actually read (start_model remapped to source fps + frame_start); all
@@ -884,6 +893,7 @@ class MultiViewRealDataset(Dataset):
             gamma_value = compute_sequence_gamma(
                 vrs, src_idx_abs, mv, self.NUM_CAMERAS, band=LOOSE_EXPOSURE_BAND
             )
+
         # image_aug is per-view but gated by the same disable_aug switch as video_aug.
         view_image_aug = self.image_aug and not disable_aug
 
@@ -907,6 +917,7 @@ class MultiViewRealDataset(Dataset):
             view_specs.append((_ci, _rr))
         decoded_per_view = None
         _cams = [c for c, _ in view_specs]
+
         # Default OFF: leave decoded_per_view=None so the view loop below decodes
         # serially via load_view(frames=None) — the pre-2026-06-17 baseline for THIS
         # dataset. Only enabled when parallel_view_decode=True AND every realized view
@@ -960,6 +971,7 @@ class MultiViewRealDataset(Dataset):
             Ts_list.append(view_data["Ts"])
 
         batch["frames"] = frames
+
         # Each *_list[v] is per-view [F, ...]. stack(dim=1) → [F, V, ...], then
         # reshape(-1, ...) flattens to FRAME-MAJOR order [f0v0, f0v1, ..., f1v0,
         # ...] (all views of frame 0, then frame 1). Downstream PRoPE/packing

@@ -1,10 +1,10 @@
 """Strict streaming loads from the original, complete H3 checkpoint."""
 
-import inspect
 import json
 import time
-from pathlib import Path
+import inspect
 from typing import Any
+from pathlib import Path
 
 import torch
 from safetensors import safe_open
@@ -215,6 +215,7 @@ def get_transformer_key_plan(config: dict[str, Any]) -> dict[str, list[tuple[str
             plan[f"{source}.attn.out_proj.weight"] = [
                 (f"{target}.attn.to_out.0.weight", [hidden_size, inner_dim])
             ]
+
             # `fc1` stays fused, as diffusers' `SwiGLU` also fuses its two projections, but the halves are swapped
             # from `[gate; value]` to `[value; gate]` (see `convert_transformer_key`).
             plan[f"{source}.mlp.fc1.weight"] = [
@@ -295,6 +296,7 @@ def load_local_model(cls, path, *, torch_dtype=None, local_files_only=True):
         raise ValueError(f"Unknown {cls.__name__} configuration: {sorted(unknown)}")
     with torch.device("meta"):
         model = cls(**{key: value for key, value in config.items() if key in keys})
+
     # Materialize nonpersistent RoPE buffers from a small empty constructor.
     buffers = dict(model.named_buffers())
     model.to_empty(device="cpu")

@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 """Reuse exact video features and encode all contiguous caption combinations."""
 
-import argparse
-import hashlib
 import json
 import shutil
-from functools import partial
+import hashlib
+import argparse
 from pathlib import Path
+from functools import partial
 
-# Resolve the existing environment before importing Torch or repository modules.
-import runtime_env  # noqa: F401; isort: skip
-
-# isort: split
+import torch
 import pyarrow as pa
 import pyarrow.parquet as pq
-import torch
 
-from h3.distributed.fsdp import wrap_text
 from h3.encoders import TextEncoder
-from utils import distributed as groups
 from utils.config import load_config
+from utils import distributed as groups
+from h3.distributed.fsdp import wrap_text
 
 
 def read_rows(path, indices):
@@ -62,6 +58,7 @@ def main():
         caption_source_frames=view["source_frames"],
         prompt=scene,
     )
+
     # Any temporal majority selection is a contiguous subset of source windows.
     captions = [scene or cfg.negative_prompt]
     for start in range(len(motions)):

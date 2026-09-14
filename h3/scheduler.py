@@ -152,6 +152,7 @@ class MiniMaxH3Scheduler:
             # The rectified-flow sigma range is fixed at [1.0, 0.0].
             base = torch.linspace(1.0, 0.0, int(num_inference_steps), dtype=torch.float32)
             sigmas = self._shift * base / (1 + (self._shift - 1) * base)
+
             # The shift compresses the grid near sigma = 1; collapse any float32 collisions it creates.
             sigmas = torch.unique_consecutive(sigmas)
         else:
@@ -160,6 +161,7 @@ class MiniMaxH3Scheduler:
                 raise ValueError("`sigmas` must hold at least two strictly decreasing values ending at 0.0.")
 
         self.sigmas = sigmas.to(device=device)
+
         # t = 1 - sigma, and t = 1 is clean. The terminal sigma has no model evaluation.
         self.timesteps = (1.0 - sigmas[:-1]).to(device=device)
         self.num_inference_steps = int(self.timesteps.numel())

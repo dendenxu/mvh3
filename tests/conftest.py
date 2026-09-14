@@ -1,12 +1,4 @@
-"""Use the pinned sibling dependencies when running from the downloaded bundle."""
-
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-for candidate in (ROOT.parent / "python_deps", ROOT.parent / "diffusers" / "src", ROOT):
-    if candidate.is_dir():
-        sys.path.insert(0, str(candidate))
+"""Keep CPU regression work within the same thread budget as training."""
 
 import torch
 

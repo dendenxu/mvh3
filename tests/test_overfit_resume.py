@@ -1,18 +1,14 @@
 """Diagnostic convergence must never turn failed reproducibility into acceptance."""
 
-import sys
 from copy import deepcopy
-from pathlib import Path
 
-import pytest
 import torch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from overfit import restored_state_checks, resume_evaluation_decision
+import pytest
 from test_ema import setup, update
 
-from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.ema import ShardedEMA
+from utils.checkpoint import load_checkpoint, save_checkpoint
+from scripts.overfit import restored_state_checks, resume_evaluation_decision
 
 
 @pytest.mark.parametrize("corrupt", [None, "raw", "adamw", "ema"])

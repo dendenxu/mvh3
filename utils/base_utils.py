@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import TYPE_CHECKING, Callable, Dict, Mapping, TypeVar
+from typing import Dict, Mapping, TypeVar, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch
@@ -12,8 +12,8 @@ VT = TypeVar("VT")  # value type
 
 
 def type_to_torch_dtype(type):
-    import numpy as np
     import torch
+    import numpy as np
 
     if not hasattr(type_to_torch_dtype, "dtype_map"):
         type_to_torch_dtype.dtype_map = {
@@ -78,10 +78,9 @@ class dotdict(dict, Dict[KT, VT]):
                     if target_type == bool and isinstance(v, str):
                         dct[k] = v == "True"
                     else:
-                        import numpy as np
-
                         # Lazy imports
                         import torch
+                        import numpy as np
 
                         if isinstance(v, torch.Tensor) and issubclass(target_type, np.ndarray):
                             dct[k] = v

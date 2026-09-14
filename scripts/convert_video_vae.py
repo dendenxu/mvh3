@@ -5,20 +5,16 @@ This is an offline preparation step. Training reads the converted checkpoint
 from MVH3_VAE and never imports this script or any audio/publishing converter.
 """
 
-# Resolve the existing environment before importing Torch or repository modules.
-import runtime_env  # noqa: F401; isort: skip
-
-# isort: split
-import argparse
-import json
 import os
+import json
+import argparse
 from typing import Any
 
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from h3.checkpoint import reorder_interleaved_qkv, split_fused_qkv
+from h3.checkpoint import split_fused_qkv, reorder_interleaved_qkv
 
 SAFE_WEIGHTS_INDEX_NAME = "diffusion_pytorch_model.safetensors.index.json"
 

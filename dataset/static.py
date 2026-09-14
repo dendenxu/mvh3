@@ -1,39 +1,39 @@
 # Static scene dataset for DL3DV, RealEstate10K, and similar trajectory-based datasets
 # Creates multi-view by sampling non-overlapping trajectory segments from a single video
+import os
 import json
 import math
-import os
-import random
 import time
-from os.path import basename, dirname, isabs, isdir, isfile, join, splitext
+import random
 from typing import List
+from os.path import join, isabs, isdir, isfile, dirname, basename, splitext
 
+import torch
 import numpy as np
 import pyarrow.parquet as pq
-import torch
 from torch.utils.data import Dataset, get_worker_info
 
 import utils.video as video_utils
+from utils.random import set_seed
+from utils.base_utils import dotdict
+from utils.tensors import as_numpy_func
+from utils.parallel import parallel_execution
+from utils.video import TorchCodecVideoReader
 from dataset.fps_remap import resolve_fps_remap
+from utils.console import log, red, blue, green, stacktrace
+from utils.distributed import get_rank, is_node_main, get_world_size
+from utils.math_utils import ixt_inverse, ixt_padding, affine_inverse, affine_padding
 from dataset.mvgame import (
+    pack_factory,
+    gamma_correct,
+    normalize_ixt,
+    make_strip_pack,
+    video_augmentation,
     LOOSE_EXPOSURE_BAND,
     compute_sequence_gamma,
-    gamma_correct,
-    make_strip_pack,
     normalize_cam_translation,
-    normalize_ixt,
-    pack_factory,
     select_pose_stable_factor,
-    video_augmentation,
 )
-from utils.base_utils import dotdict
-from utils.console import blue, green, log, red, stacktrace
-from utils.distributed import get_rank, get_world_size, is_node_main
-from utils.math_utils import affine_inverse, affine_padding, ixt_inverse, ixt_padding
-from utils.parallel import parallel_execution
-from utils.random import set_seed
-from utils.tensors import as_numpy_func
-from utils.video import TorchCodecVideoReader
 
 try:
     import roma
@@ -196,6 +196,7 @@ class StaticDataset(Dataset):
         self.sp_sharding = sp_sharding
         self.per_worker_threads = per_worker_threads
         self.mv_size = mv_size
+
         # Keep config-time mv_size separately — maybe_pick_shape mutates self.mv_size
         # at runtime so handle_static_exhausted can't use self.mv_size as the
         # config default for dynamic_mv_size=None case.
@@ -224,6 +225,7 @@ class StaticDataset(Dataset):
             assert len(self.shape_pool_weights) == len(
                 self.shape_pool
             ), f"shape_pool_weights length {len(self.shape_pool_weights)} != shape_pool length {len(self.shape_pool)}"
+
         # Set when a __getitem__ call has been routed through shape_pool — toggles
         # strip pack lookup at the runtime pack site.
         self.shape_pool_active = False
@@ -407,6 +409,7 @@ class StaticDataset(Dataset):
         def read_one_rg(rg_idx):
             pf_local = pq.ParquetFile(self.data_path)
             rg_start, rg_end = rg_offsets[rg_idx]
+
             # Indices within this row group, in local coordinates.
             rg_needed_local = sorted(
                 orig_idx - rg_start for orig_idx in needed if rg_start <= orig_idx < rg_end
@@ -428,6 +431,7 @@ class StaticDataset(Dataset):
                     while cursor < len(rg_needed_local) and rg_needed_local[cursor] < batch_end:
                         local_idx = rg_needed_local[cursor]
                         orig_idx = local_idx + rg_start
+
                         # Store RAW flat array only (40 bytes/frame vs 720 parsed).
                         # Parsing + normalization deferred to get_cameras() at access time.
                         out[orig_idx] = np.asarray(
@@ -592,6 +596,7 @@ class StaticDataset(Dataset):
         this to drop the dataset (weight=0, never picked)."""
         if not self.metadata:
             return 0
+
         # tfs = "target frame size": gen_size latent frames converted to source
         # pixel frames. The causal VAE maps vae_stride_t (=4) pixel frames to 1
         # latent frame, except the first latent frame which covers a single
@@ -626,6 +631,7 @@ class StaticDataset(Dataset):
         ), f"Scene too short: {n_frames_total} frames < {needed} needed ({mv_size} views x {total_frame_size} frames)"
 
         slack = n_frames_total - needed
+
         # Random partition of slack into (mv_size + 1) non-negative integer gaps.
         # This is the "stars and bars" method from combinatorics (Feller, 1968,
         # "An Introduction to Probability Theory and Its Applications", Ch. II.5).
@@ -691,6 +697,7 @@ class StaticDataset(Dataset):
             return frame_indices
         if abs(n_cam - n_vid) <= 1:
             return np.minimum(frame_indices, n_cam - 1)
+
         # Subsampled pose: linear interpolation from video space into pose space.
         scale = (n_cam - 1) / max(1, n_vid - 1)
         return np.minimum(
@@ -870,6 +877,7 @@ class StaticDataset(Dataset):
             for _short_mv, short_gen in short_paths:
                 if short_gen:
                     candidates.append(short_gen)
+
         # shape_pool gens — a row is viable if it fits the smallest pool gen.
         for _mv_p, gen_p in getattr(self, "shape_pool", []) or []:
             if gen_p:
@@ -878,6 +886,7 @@ class StaticDataset(Dataset):
         tfs = gs * self.vae_stride_t - 3
 
         src_fps = float(meta.get("fps", self.model_fps)) or self.model_fps
+
         # Must mirror runtime's effective ratio (load_one_video_view uses
         # resolve_fps_remap which snaps NTSC sources UP — e.g. 59.94 → ratio
         # 60/15 = 4.0, not 59.94/16 = 3.74). Using the raw ratio here lets
@@ -912,6 +921,7 @@ class StaticDataset(Dataset):
                 f"prefilter — should never be picked by DatasetAggregator "
                 f"(weight=0). Check data_path={self.data_path}"
             )
+
         # __len__ is inflated huge so RandomSampler(replacement=True) draws idx
         # from a vast space. Decompose it: quotient = pseudo-epoch counter,
         # remainder = which scene. Seeding RNG by the quotient means each time
@@ -958,6 +968,7 @@ class StaticDataset(Dataset):
 
         static_latent_size = self.gen_size
         static_frame_size = static_latent_size * self.vae_stride_t - 3
+
         # `total_*` track the *chosen* path; updated below if we swap to long-gen.
         total_latent_size = static_latent_size
         total_frame_size = static_frame_size
@@ -1013,6 +1024,7 @@ class StaticDataset(Dataset):
             for fps_ratio, level_eff_model, mv in fallback_levels:
                 if mv > self.mv_size or mv not in pack_factory:
                     continue
+
                 # Skip remap levels with reduced mv — if remap didn't help at full
                 # mv, reducing mv at the same fps_ratio won't help either since the
                 # native-fps path always has >= as many source frames.
@@ -1056,6 +1068,7 @@ class StaticDataset(Dataset):
             total_frame_size = long_tfs
 
         fps_ratio, mv, src_frame_size, level_eff_model = chosen
+
         # Effective fps seen by the model: the eff_model_fps of whatever tier
         # the chain settled on. For the primary (factory) tier, this is the
         # snapped eff_model (e.g. 15 for source 30/60). For native fallback
@@ -1095,11 +1108,13 @@ class StaticDataset(Dataset):
         batch["cpu"]["video_path"] = meta["video_path"]
         batch["cpu"]["dataset_name"] = self.dataset_name
         batch["cpu"]["parquet"] = basename(self.data_path)
+
         # Reproduction info: the per-view (seg_start, seg_end) source-frame
         # segments chosen by sample_view_segments (stars-and-bars over slack),
         # plus the fps remap ratio and augmentation params. Together with
         # video_path + seed, these let a debug tool replay the exact frames.
         batch["cpu"]["segments"] = np.asarray(segments, dtype=np.int64)  # (mv, 2)
+
         # Row + overall source-frame span for the vis meta panel (parity with
         # mvgame/multiview/dynamic). Static builds mv from time-disjoint segments
         # of ONE video, so the panel shows the row plus the min-start / max-end
@@ -1111,6 +1126,7 @@ class StaticDataset(Dataset):
         batch["cpu"]["end_frames"] = np.asarray([int(seg_bounds[:, 1].max()) + frame_start], dtype=np.int64)
         batch["cpu"]["fps_ratio"] = float(fps_ratio)
         batch["cpu"]["aug_kwargs"] = dict(aug_kwargs)
+
         # fps_cond: effective fps after any subsampling. When using model_fps
         # remap (fps_ratio > 1), effective = model_fps ≈ 24. When using native
         # fps (fallback), effective = src_fps. The network needs this to know

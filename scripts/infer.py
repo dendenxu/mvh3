@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""Standalone i2v: torchrun scripts/infer.py --request request.json --config training.yaml."""
+"""Standalone i2v: torchrun --module scripts.infer --request request.json --config training.yaml."""
 
 import argparse
 
-# Resolve the existing environment before importing Torch or repository modules.
-import runtime_env  # noqa: F401; isort: skip
-
-# isort: split
-
-from pipeline.inference import run_inference
 from utils.config import load_config
+from pipeline.inference import run_inference
 
 
 def main():

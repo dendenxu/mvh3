@@ -4,16 +4,16 @@ import time
 from collections import deque
 from functools import partial
 
-import numpy as np
 import torch
+import numpy as np
 from scipy.spatial.transform import Rotation
 
 from dataset import create_dataset
-from dataset.mvgame import cycle, worker_init_fn
-from model.chunks import prepare_chunk_plan
 from utils import distributed as groups
 from utils.captions import caption_specs
+from model.chunks import prepare_chunk_plan
 from utils.config import stage_dataset_config
+from dataset.mvgame import cycle, worker_init_fn
 
 
 class BatchLoader:
@@ -85,6 +85,7 @@ class BatchLoader:
         # Step 2: Encode pixels and draw the latent blocks used by captions.
         started = time.monotonic()
         document = self.video.prepare(self.pending.popleft(), self.cfg, self.validation)
+
         # Each rank owns different raw samples until gather_mixed_batch. Plan
         # locally before encoding captions; broadcast the whole document later.
         document = prepare_chunk_plan(document, self.cfg, self.video.device, synchronize=False)
@@ -131,6 +132,7 @@ class BatchLoader:
         if native_image:
             image_encoded = self.text.i2v(list(zip(texts, pictures)))
             encoded = [value["features"] for value in image_encoded]
+
             # Text dropout retains the image semantics of i2v.
             dropped = None
             if self.cfg.cond_text_dropout_ratio and not self.validation:
@@ -205,6 +207,7 @@ def extract_views(sample):
                 for k in ("Ks", "Rs", "Ts", "projs", "projs_inv")
             }
         k, r, t = geometry["Ks"].float(), geometry["Rs"].float(), geometry["Ts"].float()
+
         # WorldViews builds normalized intrinsics against the nominal canvas,
         # including for reduced-resolution tiles. Preserve that convention.
         pose = torch.empty((len(pixels), 10), dtype=torch.float32)
@@ -268,6 +271,7 @@ def source_documents(sample, stage, short_frames=77):
             )
         ]
     documents = []
+
     # Shorten time without turning a source's view batch into separate updates.
     # The packed mask keeps each view independent, including its own image/text.
     for start in range(0, max(len(view["pixels"]) for view in views), short_frames):

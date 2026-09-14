@@ -46,6 +46,7 @@ Use the existing WorldViews environment and its compiled FA4 installation.
 Required paths are listed in `.env.example`; weights and datasets are external.
 
 ```bash
+conda activate worldviews
 export MVH3_CHECKPOINT=/path/to/MiniMax-H3/FL2VA
 export MVH3_VAE=/path/to/converted/video/vae
 export MVH3_DATA_ROOT=/path/to/datasets
@@ -54,7 +55,7 @@ python main.py -c configs/stage1_compile_buckets.yaml --print-config
 torchrun --nproc_per_node=8 main.py -c configs/stage1_compile_buckets.yaml
 ```
 
-The Stage 1 recipe uses the complete paired SHORT data, RF off, context noise
+The Stage 1 recipe uses the complete paired SHORT data, resampling forcing off, context noise
 0.2/std 0.1, SP8/FSDP8, CPU offload, gradient checkpointing and compilation.
 It partitions each sequence into random 3-20-latent blocks before choosing the
 clean-prefix cut. Only the noisy suffix contributes loss. Captions retain the
@@ -74,7 +75,7 @@ torchrun --nproc_per_node=8 main.py -c local/run/resolved.yaml \
   resume_ckpt=local/run/ckpt/latest.json
 ```
 
-Stage 2 additionally sets `h3.stage=2`. Stage transitions, LR warmup and RF warmup
+Stage 2 additionally sets `h3.stage=2`. Stage transitions, learning rate warmup and resampling forcing warmup
 are separate decisions. The managed 64-GPU payload is `scripts/run/train_hr.sh`.
 
 ## Inference
@@ -93,7 +94,7 @@ Paths are relative to the request JSON.
 ```
 
 ```bash
-torchrun --nproc_per_node=8 scripts/infer.py \
+torchrun --nproc_per_node=8 --module scripts.infer \
   --config configs/init_wrapped.yaml --request request.json \
   --output local/inference --verify-init
 ```
@@ -113,9 +114,12 @@ isort main.py h3 model trainer pipeline dataset utils scripts tests
 black main.py h3 model trainer pipeline dataset utils scripts tests
 ```
 
-Formatting settings are in `pyproject.toml`. Long workflows use blank lines and
-short phase comments; helper names describe their purpose without a leading
-underscore. See [single-sequence validation](docs/OVERFIT.md) for the reusable
+Formatting settings are in `pyproject.toml`. Imports use separate standard-library,
+third-party and repository groups, sorted by length within each group. Leave a
+blank line before comments that introduce a new phase. Spell out business terms
+such as resampling forcing; helper names describe their purpose without a leading
+underscore. Run CLI modules from the repository root; Python entry points do not
+modify `PATH` or `sys.path`. See [single-sequence validation](docs/OVERFIT.md) for the reusable
 convergence command. CPU regression tests do not establish GPU convergence,
 full-batch memory capacity or multi-node throughput.
 

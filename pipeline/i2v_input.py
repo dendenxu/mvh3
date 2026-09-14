@@ -3,16 +3,16 @@
 import math
 from pathlib import Path
 
-import numpy as np
 import torch
-import torch.nn.functional as F
+import numpy as np
 from PIL import Image
+import torch.nn.functional as F
 
 from h3.data import temporal_layout
-from h3.modules.camera import camera_projection
-from model.chunks import prepare_chunk_plan
-from utils.camera import prepare_camera_geometry
 from utils.captions import caption_specs
+from model.chunks import prepare_chunk_plan
+from h3.modules.camera import camera_projection
+from utils.camera import prepare_camera_geometry
 
 
 def prepare_request(request, root, video, text, cfg, chunked=None):
@@ -80,6 +80,7 @@ def prepare_request(request, root, video, text, cfg, chunked=None):
             )
         weights = F.pad(torch.ones(1, 1, h, w), (0, (-w) % 32, 0, (-h) % 32))
         weights = F.avg_pool2d(weights, 32, 32)[0, 0]
+
         # Only shape is supplied for the target. No future image/video is loaded or encoded.
         target = torch.zeros(1, 24, len(layout.valid), (h + 31) // 32 * 2, (w + 31) // 32 * 2)
         views.append(

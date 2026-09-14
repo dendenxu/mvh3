@@ -116,6 +116,7 @@ class ShardedEMA:
         if self.swapped:
             raise RuntimeError("EMA parameter swaps cannot be nested")
         parameters = self.checked_parameters(model)
+
         # FSDP may still be reading pinned CPU shards in asynchronous H2D
         # copies after forward returns. Finish those reads before changing them.
         if torch.cuda.is_initialized():

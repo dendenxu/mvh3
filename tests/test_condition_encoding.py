@@ -1,12 +1,12 @@
-import numpy as np
 import torch
+import numpy as np
 from PIL import Image
 from test_native_flow import native_recipe
 
 from h3.data import temporal_layout
 from h3.encoders import VideoEncoder
-from h3.modules.camera import camera_projection
 from pipeline.i2v_input import prepare_request
+from h3.modules.camera import camera_projection
 
 
 class PosteriorFixture(VideoEncoder):

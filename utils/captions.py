@@ -50,6 +50,7 @@ def caption_specs(view, cfg):
         duration = view.get("caption_source_frames", offset + view["source_frames"])
         threshold = cfg.h3.get("caption_overlap_threshold", 0.5)
         result = []
+
         # Source captions use Wan's 17-frame first window, then 20-frame windows.
         # H3 blocks use another latent clock; compare physical frame intervals.
         for i, (start, stop) in enumerate(intervals.tolist()):
@@ -60,6 +61,7 @@ def caption_specs(view, cfg):
                 overlap = max(0, min(stop + offset, right) - max(start + offset, left))
                 if right > left and overlap > threshold * (right - left):
                     selected.append(str(motion).strip())
+
             # A small block can cover no majority window. Retain only the scene.
             result.append(
                 (

@@ -2,13 +2,13 @@
 
 import torch
 
+from model.chunks import view_chunk_ids
 from h3.modules.kv_cache import make_caches
 from h3.packing import patchify, unpatchify
 from h3.scheduler import MiniMaxH3Scheduler
-from model.chunks import view_chunk_ids
 from model.diffusion import DiffusionObjective
-from pipeline.unipc import FlowUniPCMultistepScheduler
 from utils.distributed import broadcast_scoped
+from pipeline.unipc import FlowUniPCMultistepScheduler
 
 
 @torch.no_grad()
@@ -53,6 +53,7 @@ def generate(model, document, negative, cfg, device, steps=None, use_cache=None)
     context_noise = (
         cfg.inference_context_noise if cfg.inference_context_noise is not None else cfg.context_noise
     )
+
     # Native keyframe augmentation is drawn once per request, before target
     # noise, and held fixed across solver steps, CFG branches and cache writes.
     conditions = objective.condition_latents(document, device)
@@ -62,6 +63,7 @@ def generate(model, document, negative, cfg, device, steps=None, use_cache=None)
         # the noisy-target forward changes its keys at every solver step.
         # Rebuild at the same clean timestep used by persistent KV writes.
         caches = make_caches(core, cfg, True, document)
+
         # Replay the same chunk writes as the persistent cache. Besides keeping
         # sink/window eviction identical, this preserves native BF16 rounding:
         # one large prefix forward is not numerically equivalent on the 33B model.
@@ -130,6 +132,7 @@ def generate(model, document, negative, cfg, device, steps=None, use_cache=None)
                     predictions.append(velocity[:, record["start"] : record["stop"]])
                     samples.append(patchify(record["noisy"]))
                 packed = torch.cat(samples, 1)
+
                 # The original UniPC scheduler consumes noise-data velocity;
                 # native H3 produces data-noise. Convert only at this boundary.
                 prediction = torch.cat(predictions, 1)

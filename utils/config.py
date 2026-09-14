@@ -1,7 +1,7 @@
 """Resolve the complete WorldViews recipe and its explicit H3 adaptation."""
 
-import hashlib
 import json
+import hashlib
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -24,6 +24,7 @@ def stage_dataset_config(cfg, stage, validation=False):
     if stage == 1 and cfg.h3.get(key):
         override = cfg.h3[key]
         data = OmegaConf.merge(data, override)
+
         # An empty SHORT remap clears FULL's caps, rather than merging with them.
         if "shape_remap" in override:
             data.shape_remap = OmegaConf.to_container(override.shape_remap, resolve=True)
@@ -35,8 +36,10 @@ def recipe_digest(cfg):
     from h3.modules.camera import TRANSLATION_FREQUENCIES
 
     data = OmegaConf.to_container(cfg, resolve=True)
+
     # Analytic camera constants change checkpoint semantics without adding weights.
     data["camera_encoding"] = {"translation_frequencies": list(TRANSLATION_FREQUENCIES)}
+
     # CPU and CUDA generators produce different posterior samples at the same seed.
     data["condition_encoding"] = {"posterior_generator_device": "cpu"}
     h3 = data.get("h3", {})
@@ -67,7 +70,7 @@ def validate_config(cfg):
     if any(type(value) is not int or value <= 0 for value in buckets.values()):
         raise ValueError("H3 training shape buckets must be positive integer multiples")
     if cfg.h3.get("caption_mode") is not None:
-        raise ValueError("Caption modes were replaced by per-BD temporal-overlap selection")
+        raise ValueError("Caption modes were replaced by per-diffusion temporal-overlap selection")
     if not isinstance(cfg.h3.get("single_sequence", False), bool):
         raise ValueError("H3 single_sequence must be a boolean")
     for name in ("clean_prefix_probability", "caption_overlap_threshold"):
@@ -111,6 +114,7 @@ def validate_config(cfg):
         raise ValueError("Condition noise must be in [0, 1]")
     if cfg.sampling_solver == "h3_euler" and (cfg.guidance_scale != 1 or cfg.cfg_rescale_factor):
         raise ValueError("H3 Euler inference uses the released CFG-distilled single-forward recipe")
+
     # The baseline Wan geometry is intentionally retained for source sampling.
     # Only the H3 encoder/transformer interpret the actual H3 latent geometry.
     if list(cfg.model.vae_stride) != [4, 8, 8]:
@@ -153,7 +157,7 @@ def validate_config(cfg):
             "The current H3 recipe uses history/multiview attention in both original-layer streams"
         )
     if cfg.resampling_forcing_staircase or cfg.force_clean_history:
-        raise ValueError("Use the reference RF/history settings")
+        raise ValueError("Use the reference resampling forcing/history settings")
     return cfg
 
 

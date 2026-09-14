@@ -1,12 +1,12 @@
 import io
 
-import pytest
 import torch
+import pytest
 from diffusers import MiniMaxH3Transformer3DModel
-from fixtures_h3 import attention_parameters, flow_matching_loss, parameter_signature, tiny_model
+from fixtures_h3 import tiny_model, flow_matching_loss, parameter_signature, attention_parameters
 
 from h3 import MVH3Transformer3DModel
-from h3.modules.masking import CLEAN, CONDITION, NOISY, TokenLayout
+from h3.modules.masking import CLEAN, NOISY, CONDITION, TokenLayout
 
 
 def inputs(audio_tokens=0, batch=2):

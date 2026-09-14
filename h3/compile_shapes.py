@@ -1,6 +1,6 @@
 """Bound static training shapes without truncating observations or captions."""
 
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import fields, replace, is_dataclass
 
 import torch
 

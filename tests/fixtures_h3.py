@@ -2,8 +2,8 @@
 
 import torch
 
-from h3 import MVH3Transformer3DModel
 from h3.data import temporal_layout
+from h3 import MVH3Transformer3DModel
 from h3.modules.camera import camera_projection
 
 

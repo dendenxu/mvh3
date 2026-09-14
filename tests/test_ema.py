@@ -1,11 +1,11 @@
 from copy import deepcopy
 
-import pytest
 import torch
+import pytest
 from omegaconf import OmegaConf
 
-from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.ema import ShardedEMA, inference_weight_kind
+from utils.checkpoint import load_checkpoint, save_checkpoint
 
 
 def setup():

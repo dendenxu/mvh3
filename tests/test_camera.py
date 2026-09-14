@@ -1,7 +1,7 @@
-import pytest
 import torch
+import pytest
 
-from h3.modules.camera import apply_camera, precompute_camera, rotvec_to_matrix, wigner_rotation
+from h3.modules.camera import apply_camera, wigner_rotation, rotvec_to_matrix, precompute_camera
 
 
 def poses(batch=2, count=3):
@@ -63,6 +63,7 @@ def test_wide_translation_keeps_small_motion_and_breaks_old_period(axis):
     features = torch.ones(1, 5, 1, 128)
     encoded = apply_camera(features, precompute_camera(pose, pose[:, :1]), torch.arange(5))
     torch.testing.assert_close(encoded.norm(dim=-1), features.norm(dim=-1), atol=5e-6, rtol=2e-6)
+
     # Centimeter motion remains visible, and a full turn of the old integer
     # frequency bank no longer aliases to the reference camera.
     for index in range(1, 5):

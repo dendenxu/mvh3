@@ -1,19 +1,19 @@
 """Online experiment metrics, media, provenance and durable WandB run identity."""
 
-import hashlib
 import json
-import subprocess
+import hashlib
 import tarfile
-from importlib import metadata
+import subprocess
 from numbers import Real
 from pathlib import Path
+from importlib import metadata
 
 import torch
 import torch.distributed as dist
 from omegaconf import OmegaConf
 
-from utils import distributed as groups
 from utils.config import recipe_digest
+from utils import distributed as groups
 
 
 class Tracker:
@@ -55,6 +55,7 @@ class Tracker:
                         },
                         allow_val_change=True,
                     )
+
                 # Tracking can resume at SDK step 1 after a failed init that
                 # never trained. Keep global optimizer steps in the `step`
                 # metric while respecting the SDK's monotonic history cursor.
@@ -141,6 +142,7 @@ class Tracker:
                     history[key] = value
                 else:
                     metadata_values[key] = value
+
             # byted-wandb serializes bare strings as Scalar.Value, which the
             # server rejects for the entire metrics batch. Keep paths/text in
             # summary/provenance and only numeric/media values in history.

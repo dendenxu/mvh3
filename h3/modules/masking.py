@@ -98,6 +98,7 @@ class TokenLayout:
                 or self.history_dropout.device != self.kind.device
             ):
                 raise ValueError("history_dropout must be a nonempty boolean matrix on the layout device")
+
             # A 1x1 CuTe auxiliary buffer has ambiguous strides; its flat view
             # preserves the same mask with a unique contiguous dimension.
             object.__setattr__(self, "_history_dropout_flat", self.history_dropout.reshape(-1))
@@ -130,6 +131,7 @@ class TokenLayout:
             previous = previous & False
         if self.history_dropout is not None:
             n, m = self.history_dropout.shape
+
             # FA4/CuTe indirect buffer indices must be Int32, including values
             # loaded from the canonical int64 layout tensors.
             drop_index = qchunk.clamp(0, n - 1) * m + kchunk.clamp(0, m - 1)

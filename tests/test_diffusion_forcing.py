@@ -2,19 +2,19 @@ from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 
-import pytest
 import torch
-from fixtures_h3 import feature_document, tiny_model
-from test_worldviews import dense_inputs, recipe
+import pytest
+from test_worldviews import recipe, dense_inputs
+from fixtures_h3 import tiny_model, feature_document
 
-from h3.modules.grouped_attention import visibility_groups
-from h3.modules.kv_cache import HistoryCache
-from h3.modules.masking import CLEAN, CONDITION, NOISY, TokenLayout
-from model.chunks import prepare_chunk_plan, prepare_clean_prefix
-from model.diffusion import DiffusionObjective
 from utils.captions import caption_specs
-from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.config import validate_config
+from h3.modules.kv_cache import HistoryCache
+from model.diffusion import DiffusionObjective
+from h3.modules.grouped_attention import visibility_groups
+from utils.checkpoint import load_checkpoint, save_checkpoint
+from model.chunks import prepare_chunk_plan, prepare_clean_prefix
+from h3.modules.masking import CLEAN, NOISY, CONDITION, TokenLayout
 
 
 def df_recipe():
@@ -160,6 +160,7 @@ def test_future_video_and_caption_length_cannot_change_earlier_blocks():
 
 def test_caption_majority_is_strict_and_uses_original_caption_duration():
     cfg = df_recipe()
+
     # A synthetic frame clock makes exact majority/tie boundaries explicit.
     view = dict(
         frames=torch.tensor([0.0, 17.0, 27.0, 37.0, 48.0, 57.0]),
@@ -178,6 +179,7 @@ def test_caption_majority_is_strict_and_uses_original_caption_duration():
         (4, "A room."),
         (5, "A room.\nWave."),
     ]
+
     # Slicing a clip never shrinks the original window's majority denominator.
     view.update(
         frames=torch.tensor([0.0]), generation_chunks=torch.tensor([0]), source_start=37, source_frames=10
@@ -204,7 +206,7 @@ def test_short_piece_uses_its_sliced_motions_without_parent_narrative_or_labels(
     assert all(text == "A stationary object." for _, text in caption_specs(view, cfg))
 
 
-def test_rf_promotes_predicted_block_and_resume_keeps_both_plan_and_cut(tmp_path):
+def test_resampling_forcing_promotes_predicted_block_and_resume_keeps_both_plan_and_cut(tmp_path):
     cfg, document = df_recipe(), planned_document()
     cfg.resampling_forcing = True
     cfg.resampling_forcing_warmup_steps = 0
@@ -214,14 +216,16 @@ def test_rf_promotes_predicted_block_and_resume_keeps_both_plan_and_cut(tmp_path
     _, log = objective.compute_loss(
         lambda **x: SimpleNamespace(sample=torch.zeros_like(x["hidden_states"])), document, "cpu", 0
     )
-    assert log["rf"]
+    assert log["resampling_forcing"]
     pending = objective.resample_document(document)
     assert pending["views"][0]["clean_prefix_chunks"] == 2
     assert torch.equal(pending["views"][0]["generation_chunks"], document["views"][0]["generation_chunks"])
     model = torch.nn.Linear(2, 2)
     optimizer = torch.optim.AdamW(model.parameters())
-    path = save_checkpoint(model, optimizer, cfg, 1, 1, {"pending_rf": (pending, log["x0"])}, tmp_path)
-    saved, override = load_checkpoint(model, optimizer, cfg, path)["runtime"]["pending_rf"]
+    path = save_checkpoint(
+        model, optimizer, cfg, 1, 1, {"pending_resampling_forcing": (pending, log["x0"])}, tmp_path
+    )
+    saved, override = load_checkpoint(model, optimizer, cfg, path)["runtime"]["pending_resampling_forcing"]
     rng = torch.get_rng_state()
     assert objective.prepare_document(saved, "cpu") is saved
     assert torch.equal(rng, torch.get_rng_state())
@@ -234,7 +238,7 @@ def test_rf_promotes_predicted_block_and_resume_keeps_both_plan_and_cut(tmp_path
     assert weights[promoted].eq(0).all()
 
 
-def test_default_df_rf_does_not_replace_its_first_prediction_with_ground_truth():
+def test_default_diffusion_forcing_resampling_does_not_replace_its_first_prediction_with_ground_truth():
     from pathlib import Path
 
     from utils.config import load_config
@@ -252,7 +256,7 @@ def test_default_df_rf_does_not_replace_its_first_prediction_with_ground_truth()
     _, log = objective.compute_loss(
         lambda **x: SimpleNamespace(sample=torch.zeros_like(x["hidden_states"])), document, "cpu", 0
     )
-    assert log["rf"]
+    assert log["resampling_forcing"]
     pending = objective.resample_document(document)
     _, _, weights, records, _ = objective.pack(pending, "cpu", override=log["x0"])
     for i, (view, record) in enumerate(zip(pending["views"], records)):

@@ -2,24 +2,24 @@
 
 import json
 import time
-from functools import partial
 from pathlib import Path
+from functools import partial
 
 import torch
 from omegaconf import OmegaConf
 
-from h3.distributed.fsdp import compile_blocks, wrap_model, wrap_text
-from h3.encoders import TextEncoder, VideoEncoder
-from h3.modules.model import MiniMaxH3Transformer3DModel
-from pipeline.chunked_inference import generate as generate_chunks
-from pipeline.full_sequence_inference import generate as generate_joint
-from pipeline.i2v_input import prepare_request
-from utils import distributed as groups
-from utils.checkpoint import load_checkpoint
-from utils.config import recipe_digest, validate_config
-from utils.ema import inference_weight_kind
 from utils.tracking import Tracker
 from utils.video import write_video
+from utils import distributed as groups
+from utils.ema import inference_weight_kind
+from utils.checkpoint import load_checkpoint
+from pipeline.i2v_input import prepare_request
+from h3.encoders import TextEncoder, VideoEncoder
+from utils.config import recipe_digest, validate_config
+from h3.modules.model import MiniMaxH3Transformer3DModel
+from pipeline.chunked_inference import generate as generate_chunks
+from h3.distributed.fsdp import wrap_text, wrap_model, compile_blocks
+from pipeline.full_sequence_inference import generate as generate_joint
 
 
 def run_inference(
@@ -74,6 +74,7 @@ def run_inference(
                         raise ValueError("Initialization parity requires an unchanged camera sequence")
             prepared.append((request_path, request, document, time.monotonic() - started))
         del text_encoder
+
         # Release encoder memory before loading the full denoiser. Reuse the
         # prepared requests across cases without constructing a training dataset.
         video_encoder.model.to("cpu")

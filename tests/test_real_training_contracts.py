@@ -33,6 +33,7 @@ def test_trainable_attention_preserves_sub_bf16_updates_and_resumes():
     optimizer = torch.optim.AdamW([parameter], lr=1e-6, weight_decay=0)
     parameter.grad = torch.ones_like(parameter)
     optimizer.step()
+
     # The update is smaller than a BF16 unit but survives in the actual weight
     # storage used by FSDP; forward casts do not replace that FP32 storage.
     assert (parameter < 1).all()

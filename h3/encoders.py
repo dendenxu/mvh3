@@ -1,8 +1,8 @@
 """H3 video VAE and image/text encoders used by training and inference."""
 
-import hashlib
 import os
 import uuid
+import hashlib
 from pathlib import Path
 
 import torch
@@ -24,6 +24,7 @@ def sample_condition_lengths(views, cfg, validation=False):
     )
     if validation and max_lat <= 1:
         k = int(cfg.val_cond_image_frames)
+
     # These settings count Wan latents. Convert the prefix to physical frames.
     frames = 4 * (min(k, int(cfg.max_cond_latent)) - 1) + 1
     other = torch.rand(()).item() < float(cfg.get(prefix + "other_view_cond_ratio", 0))
@@ -69,6 +70,7 @@ class VideoEncoder:
         layout = temporal_layout(len(pixels))
         h, w = pixels.shape[-2:]
         video = pixels.permute(1, 0, 2, 3)[None].to(self.device)
+
         # Pad each view independently to VAE stride 16 * patch 2. Never resize
         # or encode a spatial seam between unrelated views.
         video = F.pad(video, (0, (-w) % 32, 0, (-h) % 32, 0, 0), mode="replicate")
@@ -77,6 +79,7 @@ class VideoEncoder:
         latent = (latent - self.mean) / self.std
         if latent.shape[2] != len(layout.valid):
             raise ValueError("H3 VAE temporal geometry changed")
+
         # Fractional edge-patch weights preserve the original pixel-area loss.
         weights = torch.ones((h, w), device=self.device)
         weights = F.pad(weights, (0, (-w) % 32, 0, (-h) % 32))
@@ -111,6 +114,7 @@ class VideoEncoder:
             condition = None
             if cond_frames:
                 seed = cfg.h3.get("condition_encode_seed")
+
                 # Native H3 draws posterior noise on CPU, even for a CUDA VAE.
                 generator = torch.Generator(device="cpu").manual_seed(seed) if seed is not None else None
                 cond, cond_layout, _ = self.encode(view["pixels"][:cond_frames], generator=generator)
@@ -196,8 +200,8 @@ class TextEncoder:
         Deduplicate shared image/caption conditions before the Qwen forward.
         All ranks still participate when any rank misses its local cache.
         """
-        import torch.distributed as dist
         from PIL import Image
+        import torch.distributed as dist
         from transformers import Qwen3VLProcessor
 
         if not hasattr(self, "processor"):
@@ -298,6 +302,7 @@ class TextEncoder:
                 )
                 record = dict(identity=self.identity, features=value, tags=tags[index], format="fl2va-i2v-v1")
                 cached[path] = record
+
                 # One publisher per shared key. Return computed values directly:
                 # shared storage can lag immediately after an atomic rename.
                 if not any(str(path) in names for names in owners[:rank]):

@@ -1,5 +1,5 @@
+from typing import Dict, List, Callable
 from multiprocessing.pool import Pool, ThreadPool
-from typing import Callable, Dict, List
 
 from tqdm.auto import tqdm
 
@@ -53,6 +53,7 @@ def parallel_execution(  # noqa: C901
 
     def get_action_args(length: int, args: List, kwargs: Dict, i: int):
         action_args = [(arg[i] if isinstance(arg, list) and len(arg) == length else arg) for arg in args]
+
         # TODO: Support all types of iterable
         action_kwargs = {
             key: (

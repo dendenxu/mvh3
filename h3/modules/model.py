@@ -12,35 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
 from typing import Any
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 from torch.nn.attention.flex_attention import BlockMask
 
+from utils.config import model_config
 from h3.compile_shapes import pad_camera
-from h3.modules.attention import compiled_flex_attention, dispatch_attention_fn
-from h3.modules.camera import (
-    CameraBundle,
-    CameraEncoding,
-    MatrixCameraEncoding,
-    apply_camera,
-    apply_matrix,
-    camera_projection,
-    matrix_rotary,
-    precompute_camera,
-    relative_projection,
-)
+from h3.modules.masking import TokenLayout
+from h3.modules.attention import dispatch_attention_fn, compiled_flex_attention
 from h3.modules.layers import (
+    Timesteps,
     FeedForward,
     TimestepEmbedding,
-    Timesteps,
     get_parameter_dtype,
     set_gradient_checkpointing,
 )
-from h3.modules.masking import TokenLayout
-from utils.config import model_config
+from h3.modules.camera import (
+    apply_camera,
+    apply_matrix,
+    CameraBundle,
+    matrix_rotary,
+    CameraEncoding,
+    camera_projection,
+    precompute_camera,
+    relative_projection,
+    MatrixCameraEncoding,
+)
 
 # MiniMax-H3 tags every row of the packed sequence with the modality it belongs to and keeps one set of AdaLN
 # modulation parameters per (timestep, modality) pair: 0 = video, 1 = text, 2 = audio.
@@ -163,6 +163,7 @@ class MiniMaxH3AdaLayerNormOut(nn.Module):
         shift, scale = self.linear(nn.functional.silu(temb).to(get_parameter_dtype(self.linear))).chunk(
             2, dim=-1
         )
+
         # The modulation itself stays at the block stack's precision; `forward` casts to the output heads' dtype.
         hidden_states = self.norm(hidden_states)
         return hidden_states * (1.0 + scale.index_select(0, timestep_indices)) + shift.index_select(
@@ -901,6 +902,7 @@ class MiniMaxH3Transformer3DModel(nn.Module):
         if torch.is_grad_enabled():
             camera = pad_camera(camera, getattr(self, "training_shape_buckets", {}).get("cameras", 0))
         local_inputs = {}
+
         # Keep inference's native block representation; this only selects the
         # original FA4 backward tile used by gradient-enabled training.
         block_size = (

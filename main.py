@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
 """torchrun entry for the complete WorldViews H3 adaptation."""
 
-import argparse
 import os
-import sys
-from pathlib import Path
-
-os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
-
-dependency_dir = Path(__file__).resolve().parent.parent / "python_deps"
-if dependency_dir.is_dir():
-    sys.path.insert(0, str(dependency_dir))
+import argparse
 
 from utils.config import load_config, validate_config
 
@@ -29,11 +21,13 @@ def main():
         return
     if "RANK" not in os.environ:
         raise SystemExit("Launch with torchrun --nproc_per_node=8 main.py -c configs/diffusion_forcing.yaml")
+
     import torch
 
     # Match WorldViews' main/autograd thread pinning. Decoder worker threads
     # are configured separately; mixing the two breaks checkpoint compile guards.
     torch.set_num_threads(int(os.environ.get("WORLDGEN_TORCH_NUM_THREADS", "1")))
+
     # Image/camera requests do not need a dataset or an optimizer. Dataset
     # validation uses the trainer's normal encoders, checkpoint and EMA path.
     if cfg.task == "inference" and cfg.get("inference_request"):
@@ -48,6 +42,7 @@ def main():
             seed=cfg.seed,
         )
         return
+
     from trainer.diffusion import DiffusionTrainer
 
     if cfg.task == "inference":
@@ -59,6 +54,7 @@ def main():
         trainer.validate(cfg.inference_num_samples)
     else:
         raise ValueError(f"Unknown task: {cfg.task}")
+
     from utils.distributed import shutdown_distributed
 
     shutdown_distributed()
