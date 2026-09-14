@@ -1,6 +1,21 @@
-"""Historical all-attention probe helpers; see h3.distributed.fsdp for the recipe."""
+"""Original-attention parameter selection and flow-matching validation helpers."""
 
 import torch
+
+from h3.utils.model import canonical_name
+
+
+def parameter_groups(model, cfg):
+    """Group the selected original attention weights by their configured learning rate."""
+    buckets = {}
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        name = canonical_name(name)
+        index = int(name.split("transformer_blocks.")[1].split(".")[0])
+        lr = float(cfg.ar_lr if index % cfg.model.ar_interval == 0 else cfg.sa_lr)
+        buckets.setdefault(lr, []).append(parameter)
+    return [dict(params=params, lr=lr, initial_lr=lr) for lr, params in buckets.items()]
 
 
 def attention_parameters(model: torch.nn.Module):

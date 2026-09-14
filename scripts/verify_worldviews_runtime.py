@@ -18,7 +18,8 @@ import torch.distributed as dist
 from h3.modules.camera import camera_projection
 from h3.checkpoint import load_original_transformer
 from utils.config import load_config
-from h3.distributed.fsdp import configure_model, wrap_model, compile_blocks, parameter_groups
+from h3.distributed.fsdp import wrap_model, compile_blocks
+from h3.utils.training import parameter_groups
 from model.diffusion import WorldViewsObjective
 from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils import distributed as groups
@@ -148,7 +149,7 @@ def main():
                                             time_embed_dim=16,
                                             rope_freq_dim=16)
         documents = [feature_document(), feature_document(views=2)]
-    signature = configure_model(model, cfg)
+    signature = model.configure_attention(cfg)
     total_parameters = sum(p.numel() for p in model.parameters())
     trainable_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     reference = copy.deepcopy(model).to(device) if not args.full else None
@@ -174,7 +175,7 @@ def main():
         state = load_checkpoint(model, optimizer, cfg, args.resume)
         assert state["step"] == 1 and state["stage"] == 1
         assert_same_state(state["optimizer"], optimizer.state_dict())
-        from h3.distributed.fsdp import canonical_name
+        from h3.utils.model import canonical_name
         for name, parameter in model.named_parameters():
             if parameter.requires_grad:
                 assert torch.equal(parameter.cpu(), state["weights"][canonical_name(name)])

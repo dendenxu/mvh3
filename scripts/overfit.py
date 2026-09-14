@@ -16,7 +16,9 @@ import torch.distributed as dist
 from omegaconf import OmegaConf
 
 from h3.checkpoint import load_original_transformer
-from h3.distributed.fsdp import canonical_name, configure_model, wrap_model, compile_blocks, parameter_groups
+from h3.distributed.fsdp import wrap_model, compile_blocks
+from h3.utils.model import canonical_name
+from h3.utils.training import parameter_groups
 from model.diffusion import WorldViewsObjective
 from pipeline.ar_inference import generate
 from utils import distributed as groups
@@ -192,7 +194,7 @@ def main():
     if rank == 0:
         OmegaConf.save(cfg, args.output / "resolved.yaml")
     model = load_original_transformer(cfg.h3.checkpoint, progress=print if rank == 0 else None)
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     report = dict(status="running", recipe=recipe_digest(cfg),
                   total_parameters=sum(p.numel() for p in model.parameters()),
                   trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad),

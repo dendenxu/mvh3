@@ -12,7 +12,7 @@ import torch
 import torch.distributed as dist
 
 from utils.config import recipe_digest
-from h3.distributed.fsdp import canonical_name
+from h3.utils.model import canonical_name
 from utils.ema import decay_change_preserves_history
 
 FLOW_CONVENTION = "h3_t1_clean_data_minus_noise"

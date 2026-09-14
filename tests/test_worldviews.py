@@ -1,16 +1,16 @@
-import copy
 from pathlib import Path
 
 import pytest
 import torch
 
-from h3.modules.camera import apply_matrix, camera_projection, matrix_rotary
+from h3.modules.camera import apply_matrix, camera_projection
 from utils.config import load_config, stage_dataset_config
-from h3.data import temporal_layout
-from h3.distributed.fsdp import configure_model, compile_blocks, parameter_groups
+from h3.distributed.fsdp import compile_blocks
+from h3.utils.training import parameter_groups
 from utils.h3_wrapper import source_documents
 from h3.modules.masking import CLEAN, NOISY, TokenLayout
-from model.diffusion import WorldViewsObjective, chunk_ids
+from model.diffusion import WorldViewsObjective
+from model.chunks import chunk_ids
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from fixtures_h3 import tiny_model
 
@@ -48,10 +48,10 @@ def dense_inputs(inputs):
     return inputs
 
 
-def test_replace_original_alternate_attention_without_new_parameters():
+def test_train_alternate_original_attention_without_new_parameters():
     model, cfg = tiny_model(), recipe()
     before = {n: tuple(p.shape) for n, p in model.named_parameters()}
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     assert before == {n: tuple(p.shape) for n, p in model.named_parameters()}
     for n, p in model.named_parameters():
         assert p.requires_grad == (n.startswith("transformer_blocks.") and ".attn." in n
@@ -137,7 +137,7 @@ def test_complete_objective_updates_existing_weights_and_restores(tmp_path, monk
     monkeypatch.setenv("MVH3_DATA_ROOT3", "/data3")
     cfg, doc, model = recipe(), feature_document(views=2), tiny_model()
     cfg.gradient_checkpointing = checkpointing
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     compile_blocks(model, cfg)
     objective = WorldViewsObjective(cfg)
     inputs, target, weights, _, _ = objective.pack(doc, "cpu")
@@ -171,7 +171,7 @@ def test_scale_condition_changes_prediction_without_parameters():
     cfg.model.scale_cond = True
     cfg.dataset.pose_stable_factors = [1., 10., 100.]
     cfg.h3.scale_conditioning = "spatial_rotary"
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     document = feature_document()
     document["views"][0]["scale"] = 10.
     inputs, _, _, _, _ = WorldViewsObjective(cfg).pack(document, "cpu")

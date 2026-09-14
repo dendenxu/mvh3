@@ -12,7 +12,7 @@ import runtime_env
 import torch
 
 from h3.checkpoint import load_original_transformer
-from h3.distributed.fsdp import configure_model, wrap_model, wrap_text, compile_blocks
+from h3.distributed.fsdp import wrap_model, wrap_text, compile_blocks
 from pipeline.joint_inference import generate
 from utils import distributed as groups
 from utils.config import load_config, validate_config
@@ -67,7 +67,7 @@ def main():
                     part[key] = view[key][:1].expand_as(part[key]).clone()
             view["latent"].zero_()
     model = load_original_transformer(cfg.h3.checkpoint, progress=print if groups.get_rank() == 0 else None)
-    signature = configure_model(model, cfg)
+    signature = model.configure_attention(cfg)
     model = wrap_model(model, cfg)
     compile_blocks(model.module, cfg)
     checks = []

@@ -13,15 +13,8 @@ from omegaconf import OmegaConf
 
 from h3.checkpoint import load_original_transformer
 from utils.config import validate_config
-from h3.distributed.fsdp import (
-    compile_blocks,
-    configure_model,
-    load_compile_cache,
-    parameter_groups,
-    save_compile_cache,
-    wrap_model,
-    wrap_text,
-)
+from h3.distributed.fsdp import compile_blocks, load_compile_cache, save_compile_cache, wrap_model, wrap_text
+from h3.utils.training import parameter_groups
 from utils.h3_wrapper import VideoEncoder, TextEncoder
 from model.diffusion import WorldViewsObjective
 from utils.checkpoint import load_checkpoint, save_checkpoint
@@ -51,7 +44,7 @@ class Trainer:
         # FSDP determines parameter views and shard storage before AdamW is built.
         load_compile_cache(cfg.h3.compile_cache)
         model = load_original_transformer(cfg.h3.checkpoint, progress=print if groups.get_rank() == 0 else None)
-        self.signature = configure_model(model, cfg)
+        model.configure_attention(cfg)
         self.model = wrap_model(model, cfg)
         compile_blocks(self.model.module, cfg)
         self.ema = ShardedEMA.from_config(self.model, cfg)

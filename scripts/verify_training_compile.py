@@ -13,7 +13,8 @@ import torch.distributed as dist
 from omegaconf import OmegaConf
 
 from h3.checkpoint import load_original_transformer
-from h3.distributed.fsdp import configure_model, wrap_model, compile_blocks, parameter_groups
+from h3.distributed.fsdp import wrap_model, compile_blocks
+from h3.utils.training import parameter_groups
 from model.diffusion import WorldViewsObjective
 from utils import distributed as groups
 from utils.camera import prepare_camera_geometry
@@ -48,7 +49,7 @@ def main():
                  torch.load(args.features / "documents.pt", map_location="cpu", weights_only=True)]
     torch.manual_seed(cfg.seed)
     model = load_original_transformer(cfg.h3.checkpoint, progress=print if rank == 0 else None)
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     assert sum(p.numel() for p in model.parameters()) == 33122992896
     assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 3853523200
     model = wrap_model(model, cfg)

@@ -1,6 +1,6 @@
 # Static scene dataset for DL3DV, RealEstate10K, and similar trajectory-based datasets
 # Creates multi-view by sampling non-overlapping trajectory segments from a single video
-from typing import List, Dict, Any, Optional
+from typing import List
 from torch.utils.data import Dataset, get_worker_info
 
 import os
@@ -1185,12 +1185,8 @@ class StaticDataset(Dataset):
             Rs_list.append(view_data['Rs'])
             Ts_list.append(view_data['Ts'])
 
-        # Stack camera params: interleave views per frame (F, mv, ...) -> (F*mv, ...).
-        # Each *_list entry is one view's (F, ...) tensor; stack(dim=1) makes the
-        # view axis adjacent to frame so the flatten yields view-interleaved
-        # (frame-major) order [f0v0, f0v1, ..., f0v(mv-1), f1v0, ...]. Downstream
-        # PRoPE (utils/viewpack.py) recovers per-view matrices via stride-mv
-        # slicing `p[:, i::mv]`, which assumes exactly this interleaving.
+        # Interleave cameras as [f0v0, f0v1, ..., f1v0, ...]. extract_views()
+        # in utils/h3_wrapper.py restores this (frame, view) order.
         batch['frames'] = frames
         batch['projs'] = torch.stack(projs_list, dim=1).reshape(-1, 4, 4)
         batch['projs_inv'] = torch.stack(projs_inv_list, dim=1).reshape(-1, 4, 4)

@@ -5,9 +5,9 @@ from dataclasses import replace
 import torch
 from omegaconf import OmegaConf
 
-from h3.packing import patchify
+from h3.packing import patchify, unpatchify
 from h3.utils.scheduler import MiniMaxH3Scheduler
-from model.diffusion import WorldViewsObjective, unpatchify
+from model.diffusion import WorldViewsObjective
 from utils.distributed import broadcast_scoped
 
 

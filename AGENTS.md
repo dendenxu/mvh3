@@ -3,6 +3,7 @@
 Read `docs/MVH3.md` before changing the training port.
 
 - Business code is for human maintainers, including previously authored code. Keep the WorldViews call flow direct, names descriptive, and comments focused on non-obvious contracts. Avoid compressed nested expressions, unnecessary abstractions, forwarding layers and arbitrary file splits. Use plain helper names without a leading underscore.
+- Module names must describe their responsibility. Use existing owners before adding files; do not introduce generic `setup` modules. Camera/attention configuration belongs to the native model, optimizer groups to training helpers, and FSDP wrapping to distributed code. Delete confirmed unused code instead of keeping forwarding aliases.
 - Refactor in the current checkout unless the user asks for a separate worktree. Keep experiment history in `docs/EXPERIMENTS.md`; the code guide explains the current structure and behavior.
 - Work in this H3 checkout. `origin` is `https://github.com/dendenxu/mvh3`; `upstream` is the official MiniMax repository.
 - Camera conditioning must add zero trainable parameters. Change analytic encoding on the existing attention Q/K and train existing H3 weights. Do not add AR branches, LoRA, camera MLPs, adapters, gates, or expanded projections.

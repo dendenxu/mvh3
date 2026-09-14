@@ -1,4 +1,4 @@
-"""Original-layer training, Ulysses sequence parallelism, and mixed-storage FSDP."""
+"""FSDP/Ulysses wrapping, activation checkpointing and compilation."""
 
 from functools import partial
 from pathlib import Path
@@ -8,35 +8,6 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, CPUOffload,
 from torch.utils.checkpoint import checkpoint
 
 from utils import distributed as groups
-
-
-def configure_model(model, cfg):
-    signature = {name: tuple(p.shape) for name, p in model.named_parameters()}
-    model.requires_grad_(False)
-    for index, block in enumerate(model.transformer_blocks):
-        replaced = index % int(cfg.model.ar_interval) == 0
-        block.attn.processor.camera_mode = cfg.model.prope_mode if replaced else cfg.model.mv_prope_mode
-        block.attn.processor.fa4 = bool(cfg.model.fa4)
-        lr = cfg.ar_lr if replaced else cfg.sa_lr
-        if lr:
-            # FSDP keeps FP32 storage/gradients/AdamW moments, casting only the
-            # gathered forward weights. Small updates never round away in BF16.
-            block.attn.float().requires_grad_(True)
-    model.worldviews_camera = True
-    model.camera_wrapped = not bool(cfg.model.prope_unwrapped)
-    model.training_attention_block_size = (tuple(cfg.h3.get("training_attention_block_size", (128, 128)))
-                                          if cfg.model.fa4 else (128, 128))
-    model.grouped_attention_backward = bool(cfg.model.fa4 and cfg.h3.get("grouped_attention_backward", False))
-    model.dynamic_grouped_metadata = bool(cfg.h3.get("dynamic_grouped_metadata", False))
-    model.grouped_attention_deterministic = bool(cfg.h3.get("grouped_attention_deterministic", False))
-    model.training_shape_buckets = dict(cfg.h3.get("training_shape_buckets", {}))
-    if signature != {name: tuple(p.shape) for name, p in model.named_parameters()}:
-        raise AssertionError("The H3 parameter topology changed")
-    return signature
-
-
-def canonical_name(name):
-    return name.replace("_fsdp_wrapped_module.", "").replace("_orig_mod.", "")
 
 
 def fsdp_options(cfg, mixed=True, text=False):
@@ -124,17 +95,6 @@ def compile_blocks(model, cfg):
         block.forward = make_forward(original)
         if cfg.attn_block_compile and not outside:
             block.forward = torch.compile(block.forward, dynamic=False)
-
-
-def parameter_groups(model, cfg):
-    buckets = {}
-    for name, p in model.named_parameters():
-        if p.requires_grad:
-            clean = canonical_name(name)
-            index = int(clean.split("transformer_blocks.")[1].split(".")[0])
-            lr = float(cfg.ar_lr if index % cfg.model.ar_interval == 0 else cfg.sa_lr)
-            buckets.setdefault(lr, []).append(p)
-    return [dict(params=params, lr=lr, initial_lr=lr) for lr, params in buckets.items()]
 
 
 def save_compile_cache(directory):

@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 import torch
 
-from h3.distributed.fsdp import canonical_name
+from h3.utils.model import canonical_name
 
 
 def decay_change_preserves_history(state, decay, warmup):

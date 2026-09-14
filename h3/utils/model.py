@@ -21,6 +21,11 @@ def model_config(arguments):
     return ModelConfig({key: value for key, value in arguments.items() if key not in ("self", "__class__")})
 
 
+def canonical_name(name):
+    """Keep parameter names stable across FSDP and torch.compile wrappers."""
+    return name.replace("_fsdp_wrapped_module.", "").replace("_orig_mod.", "")
+
+
 def get_parameter_dtype(module):
     # FSDP gathered weights can be Tensor views absent from named_parameters().
     for child in module.modules():

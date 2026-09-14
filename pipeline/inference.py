@@ -9,7 +9,7 @@ import torch
 from omegaconf import OmegaConf
 
 from h3.checkpoint import load_original_transformer
-from h3.distributed.fsdp import configure_model, wrap_model, wrap_text, compile_blocks
+from h3.distributed.fsdp import wrap_model, wrap_text, compile_blocks
 from pipeline.ar_inference import generate as generate_chunks
 from pipeline.i2v_input import prepare_request
 from pipeline.joint_inference import generate as generate_joint
@@ -68,7 +68,7 @@ def run(cfg, request_path, output, checkpoint=None, protocol="auto", seed=81000,
         video_encoder.model.to("cpu")
         torch.cuda.empty_cache()
         model = load_original_transformer(cfg.h3.checkpoint, progress=print if groups.get_rank() == 0 else None)
-        configure_model(model, cfg)
+        model.configure_attention(cfg)
         model = wrap_model(model, cfg)
         if checkpoint:
             state = load_checkpoint(model, None, cfg, checkpoint, restore_random=False,

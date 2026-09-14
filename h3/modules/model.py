@@ -17,7 +17,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.nn.attention.flex_attention import BlockMask, flex_attention
+from torch.nn.attention.flex_attention import BlockMask
 
 from h3.modules.layers import FeedForward, TimestepEmbedding, Timesteps
 from h3.modules.attention import dispatch_attention_fn, compiled_flex_attention
@@ -585,6 +585,31 @@ class MiniMaxH3Transformer3DModel(nn.Module):
         self.audio_proj_out = nn.Linear(hidden_size, audio_in_channels, bias=True)
 
         self.gradient_checkpointing = False
+
+    def configure_attention(self, cfg):
+        """Set camera encoding and trainable attention before FSDP wrapping."""
+        signature = {name: tuple(p.shape) for name, p in self.named_parameters()}
+        self.requires_grad_(False)
+        for index, block in enumerate(self.transformer_blocks):
+            selected = index % int(cfg.model.ar_interval) == 0
+            block.attn.processor.camera_mode = cfg.model.prope_mode if selected else cfg.model.mv_prope_mode
+            block.attn.processor.fa4 = bool(cfg.model.fa4)
+            lr = cfg.ar_lr if selected else cfg.sa_lr
+            if lr:
+                # Keep trainable storage and gradients in FP32 so small updates
+                # survive. FSDP casts gathered forward weights to BF16 later.
+                block.attn.float().requires_grad_(True)
+        self.worldviews_camera = True
+        self.camera_wrapped = not bool(cfg.model.prope_unwrapped)
+        block_size = cfg.h3.get("training_attention_block_size", (128, 128))
+        self.training_attention_block_size = tuple(block_size) if cfg.model.fa4 else (128, 128)
+        self.grouped_attention_backward = bool(cfg.model.fa4 and cfg.h3.get("grouped_attention_backward", False))
+        self.dynamic_grouped_metadata = bool(cfg.h3.get("dynamic_grouped_metadata", False))
+        self.grouped_attention_deterministic = bool(cfg.h3.get("grouped_attention_deterministic", False))
+        self.training_shape_buckets = dict(cfg.h3.get("training_shape_buckets", {}))
+        if signature != {name: tuple(p.shape) for name, p in self.named_parameters()}:
+            raise AssertionError("The H3 parameter topology changed")
+        return signature
 
     def enable_gradient_checkpointing(self, gradient_checkpointing_func=None):
         set_gradient_checkpointing(self, True, gradient_checkpointing_func)

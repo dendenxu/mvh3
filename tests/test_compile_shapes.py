@@ -7,7 +7,7 @@ from fixtures_h3 import tiny_model
 from test_diffusion_forcing import df_recipe, planned_document
 from test_worldviews import dense_inputs
 from h3.compile_shapes import pad_camera
-from h3.distributed.fsdp import configure_model, compile_blocks
+from h3.distributed.fsdp import compile_blocks
 from h3.modules.camera import CameraBundle, camera_projection, precompute_camera
 from model.diffusion import WorldViewsObjective
 from utils.config import validate_config
@@ -21,11 +21,11 @@ def test_training_padding_preserves_data_noise_mask_predictions_and_gradients(is
     cfg.history_dropout_ratio = .2
     cfg.context_noise, cfg.context_noise_std = .2, .1
     model = tiny_model()
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     padded_cfg = deepcopy(cfg)
     padded_cfg.h3.training_shape_buckets = dict(tokens=128, timesteps=16, cameras=64, chunks=16)
     padded_model = deepcopy(model)
-    configure_model(padded_model, padded_cfg)
+    padded_model.configure_attention(padded_cfg)
     packed = []
     for config in (cfg, padded_cfg):
         torch.manual_seed(945)
@@ -88,7 +88,7 @@ def test_checkpointed_blocks_reuse_graphs_when_caption_lengths_change(monkeypatc
     cfg.h3.training_shape_buckets = dict(tokens=128, timesteps=16, cameras=64, chunks=16)
     torch.manual_seed(824)
     model = tiny_model()
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     reference = deepcopy(model)
     compile_blocks(model, cfg)
     objective = WorldViewsObjective(cfg)

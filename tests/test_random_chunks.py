@@ -5,12 +5,10 @@ import torch
 
 from fixtures_h3 import feature_document, tiny_model
 from test_worldviews import recipe, dense_inputs
-from h3.data import temporal_layout
-from h3.distributed.fsdp import configure_model
 from h3.modules.kv_cache import HistoryCache
-from h3.modules.masking import CLEAN, CONDITION, NOISY, TokenLayout
-from model.chunks import source_chunk_ids, prepare_chunk_plan, caption_chunk, chunk_intervals
-from model.diffusion import WorldViewsObjective, view_chunk_ids
+from h3.modules.masking import CLEAN, NOISY, TokenLayout
+from model.chunks import source_chunk_ids, prepare_chunk_plan, caption_chunk, chunk_intervals, view_chunk_ids
+from model.diffusion import WorldViewsObjective
 from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.config import validate_config
 
@@ -112,7 +110,7 @@ def test_merged_block_is_bidirectional_but_cannot_read_the_next_block():
 def test_future_caption_changes_do_not_change_earlier_random_chunks():
     torch.manual_seed(173)
     cfg, doc, model = random_recipe(), feature_document(frames=77), tiny_model()
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     view = doc["views"][0]
     view["generation_chunks"] = torch.tensor([0, 0, 1, 1])[source_chunk_ids(view, cfg.chunk_size)]
     view["texts"] = [(i, torch.randn(1, 3, 32)) for i in range(4)]

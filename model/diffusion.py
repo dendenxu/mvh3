@@ -7,8 +7,8 @@ from h3.packing import unpatchify
 from utils.scheduler import FlowMatchScheduler
 from utils.distributed import broadcast_scoped
 from utils.camera import prepare_camera_geometry
-from model.chunks import prepare_chunk_plan, prepare_clean_prefix, chunk_ids, view_chunk_ids
-from model.packing import SequencePacker, same_text_conditioning
+from model.chunks import prepare_chunk_plan, prepare_clean_prefix, view_chunk_ids
+from model.packing import SequencePacker
 from utils.captions import bind_caption_features
 
 

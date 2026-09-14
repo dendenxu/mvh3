@@ -19,6 +19,8 @@ layers and kernels live in `h3/`.
 | Image/camera request to saved videos             | `pipeline/inference.py`: `run`                                           |
 | Native joint sampling / trained chunk rollout    | `pipeline/joint_inference.py`, `pipeline/ar_inference.py`                |
 | Native denoiser, camera encoding and attention   | `h3/modules/model.py`, `camera.py`, `masking.py`, `grouped_attention.py` |
+| Camera modes and trainable attention             | `h3/modules/model.py`: `MiniMaxH3Transformer3DModel.configure_attention` |
+| Optimizer parameter groups                       | `h3/utils/training.py`: `parameter_groups`                               |
 | FSDP, checkpointing and compilation              | `h3/distributed/fsdp.py`                                                 |
 | Checkpoint state and averaged weights            | `utils/checkpoint.py`, `utils/ema.py`                                    |
 
@@ -26,6 +28,12 @@ layers and kernels live in `h3/`.
 `main.py` calls that same pipeline for an `inference_request`; dataset validation
 uses `Trainer.validate`. Scripts contain experiment commands and verification,
 not implementations imported by training.
+
+The network is `MiniMaxH3Transformer3DModel` in `h3/modules/model.py`. Its
+`__init__` defines input projections, the text refiner, Transformer blocks and
+output heads; `forward` runs them. Call `configure_attention` on that model
+before `wrap_model`. FSDP handles distribution, while the model owns its camera
+modes and trainable layers.
 
 ## Configs
 

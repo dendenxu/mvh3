@@ -7,11 +7,10 @@ import torch
 
 from fixtures_h3 import feature_document, tiny_model
 from test_worldviews import recipe, dense_inputs
-from h3.distributed.fsdp import configure_model
 from h3.modules.grouped_attention import visibility_groups
 from h3.modules.kv_cache import HistoryCache
 from h3.modules.masking import CLEAN, CONDITION, NOISY, TokenLayout
-from model.chunks import prepare_chunk_plan, prepare_clean_prefix, chunk_intervals
+from model.chunks import prepare_chunk_plan, prepare_clean_prefix
 from model.diffusion import WorldViewsObjective
 from utils.captions import caption_specs
 from utils.checkpoint import save_checkpoint, load_checkpoint
@@ -137,7 +136,7 @@ def test_shared_causality_all_modalities_and_grouped_backward_edges():
 
 def test_future_video_and_caption_length_cannot_change_earlier_blocks():
     cfg, doc, model = df_recipe(), planned_document(), tiny_model()
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     changed = deepcopy(doc)
     changed["views"][0]["texts"][-1] = (3, torch.randn(1, 11, 32) * 50)
     changed["views"][0]["latent"][:, :, 15:] *= 50
@@ -347,7 +346,7 @@ def test_df_cache_and_recompute_rollout_agree_with_causal_text(monkeypatch, view
     if not isolated:
         for view in doc["views"][1:]:
             view["texts"] = doc["views"][0]["texts"]
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     cfg.kv_sink_size, cfg.kv_window_size = 1, 5
     cfg.sampling_steps = 3
     cfg.kv_offload = offload

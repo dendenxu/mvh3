@@ -233,7 +233,7 @@
     "Extract the two original color transfer functions from relight_utils",
     "Keep main/autograd thread pinning independent of decoder workers"
   ],
-  "source_note": "Source hashes identify the imported working-tree snapshots; commit records their base revision, not a claim that the source worktree was clean.",
+  "source_note": "Source hashes identify the imported working-tree snapshots; commit records their base revision, not a claim that the source worktree was clean. File entries describe the original import, including unused modules subsequently removed; this is historical provenance, not the current file inventory.",
   "diffusers_expansion": {
     "repository": "huggingface/diffusers",
     "commit": "d30c748f5f5d0925a5af14dc0e6a6de983025e63",

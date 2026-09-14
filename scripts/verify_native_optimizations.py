@@ -28,7 +28,7 @@ def persist_report(output, report):
 
 
 def verify_restored_state(trainer, directory):
-    from h3.distributed.fsdp import canonical_name
+    from h3.utils.model import canonical_name
 
     path = Path(directory)
     if path.name == "latest.json":

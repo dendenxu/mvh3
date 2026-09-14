@@ -5,7 +5,6 @@ import torch
 
 from fixtures_h3 import tiny_model
 from test_overfit_native import conditioned_document, native_recipe
-from h3.distributed.fsdp import configure_model
 from h3.modules.camera import camera_projection
 from model.diffusion import WorldViewsObjective
 from pipeline.joint_inference import joint_inputs
@@ -33,7 +32,7 @@ def static_document(frames=22):
 def test_wrapped_static_camera_matches_initialized_native_all_layers():
     torch.manual_seed(419)
     cfg, doc, model = recipe(), static_document(), tiny_model().eval()
-    signature = configure_model(model, cfg)
+    signature = model.configure_attention(cfg)
     conditions = WorldViewsObjective(cfg).condition_latents(doc, "cpu")
     current = [torch.randn_like(doc["views"][0]["latent"])]
     for sigma in (.999, .5, .001):
@@ -58,7 +57,7 @@ def test_independent_static_cameras_each_match_native_initialization(mode):
         part["pose"][:, 7] += 2
         matrix = camera_projection(part["pose"][None])
         part["projection"], part["inverse"] = matrix.projection[0], matrix.inverse[0]
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     inputs, *_ = WorldViewsObjective(cfg).pack(doc, "cpu", evaluation_sigma=.5)
     assert inputs["camera_reference"].shape == inputs["camera_pose"].shape
     inputs["attention_mask"] = inputs["attention_mask"].dense()
@@ -86,7 +85,7 @@ def test_independent_video_prediction_does_not_depend_on_other_camera(mode):
     for part in (first, first["condition"]):
         matrix = camera_projection(part["pose"][None])
         part["projection"], part["inverse"] = matrix.projection[0], matrix.inverse[0]
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     predictions = []
     for value in (doc, changed):
         torch.manual_seed(27)
@@ -106,7 +105,7 @@ def test_independent_video_clock_and_prediction_ignore_other_caption_length():
     changed = copy.deepcopy(doc)
     first = changed["views"][0]
     first["text"] = torch.cat((first["text"], first["text"][:, :1] + 10), 1)
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     predictions, positions = [], []
     for value in (doc, changed):
         torch.manual_seed(27)
@@ -134,7 +133,7 @@ def test_future_caption_length_does_not_shift_earlier_video(isolated, view_count
     changed = copy.deepcopy(doc)
     first, future = changed["views"][0]["texts"]
     changed["views"][0]["texts"] = [first, (1, torch.cat((future[1], future[1][:, :1] + 10), 1))]
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     predictions, positions = [], []
     for value in (doc, changed):
         torch.manual_seed(27)
@@ -155,7 +154,7 @@ def test_future_caption_length_does_not_shift_earlier_video(isolated, view_count
 def test_wrapped_moving_camera_changes_output_and_preserves_temporal_rope():
     cfg, doc, model = recipe(), static_document(), tiny_model().eval()
     cfg.model.prope_mode = "matrix"
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     inputs, _ = joint_inputs(doc, [doc["views"][0]["latent"]],
                              WorldViewsObjective(cfg).condition_latents(doc, "cpu"), .5, cfg, "cpu")
     inputs["attention_mask"] = inputs["attention_mask"].dense()
@@ -171,7 +170,7 @@ def test_wrapped_moving_camera_changes_output_and_preserves_temporal_rope():
 
 def test_neutral_camera_uses_native_graph_but_small_motion_keeps_overlay():
     cfg, doc, model = recipe(), static_document(), tiny_model().eval()
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     inputs, _ = joint_inputs(doc, [doc["views"][0]["latent"]],
                              WorldViewsObjective(cfg).condition_latents(doc, "cpu"), .5, cfg, "cpu")
     inputs["attention_mask"] = inputs["attention_mask"].dense()
@@ -191,7 +190,7 @@ def test_neutral_camera_uses_native_graph_but_small_motion_keeps_overlay():
 def test_decomposed_uses_later_frame_camera_in_every_original_layer():
     cfg, doc, model = recipe(), static_document(), tiny_model().eval()
     cfg.model.prope_mode = cfg.model.mv_prope_mode = "decomposed"
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     view = doc["views"][0]
     view["pose"][-1, 4] += .2
     view["pose"][-1, 7] += .3
@@ -223,7 +222,7 @@ def test_video_only_padding_cannot_relay_into_video_or_text(monkeypatch):
     import model.packing as packing
     monkeypatch.setattr(packing, "get_sp_size", lambda: 8)
     cfg, doc, model = recipe(), static_document(), tiny_model().eval()
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     inputs, _ = joint_inputs(doc, [doc["views"][0]["latent"]],
                              WorldViewsObjective(cfg).condition_latents(doc, "cpu"), .5, cfg, "cpu")
     assert inputs["audio_hidden_states"].shape[1] > 0
@@ -274,7 +273,7 @@ def test_joint_i2v_layout_and_visual_text_tags_match_pinned_native(frames):
     view = doc["views"][0]
     view["fps"] = 24
     view["text_tags"] = torch.tensor([1, 0, 0])
-    configure_model(model, cfg)
+    model.configure_attention(cfg)
     native = tiny_model(MiniMaxH3Transformer3DModel).eval()
     native.load_state_dict(model.state_dict(), strict=True)
     inputs, _ = joint_inputs(doc, [view["latent"]], WorldViewsObjective(cfg).condition_latents(doc, "cpu"), .5, cfg, "cpu")
@@ -290,7 +289,7 @@ def test_joint_i2v_layout_and_visual_text_tags_match_pinned_native(frames):
 
 @pytest.mark.parametrize("frames", [17, 57, 77, 115])
 def test_decoder_support_tail_is_conditioned_and_supervised(frames):
-    from model.diffusion import view_chunk_ids
+    from model.chunks import view_chunk_ids
     cfg, doc = recipe(), static_document(frames)
     view = doc["views"][0]
     inputs, target, weights, records, _ = WorldViewsObjective(cfg).pack(doc, "cpu", evaluation_sigma=.5)

@@ -12,7 +12,7 @@ import torch
 from omegaconf import OmegaConf
 
 from h3.checkpoint import load_original_transformer
-from h3.distributed.fsdp import configure_model, wrap_model, compile_blocks
+from h3.distributed.fsdp import wrap_model, compile_blocks
 from pipeline.ar_inference import generate
 from utils import distributed as groups
 from utils.checkpoint import load_checkpoint
@@ -68,7 +68,7 @@ def main():
         document = torch.load(args.document, map_location="cpu", weights_only=False)
         report["chunk_sizes"] = [torch.bincount(v["generation_chunks"]).tolist() for v in document["views"]]
         model = load_original_transformer(cfg.h3.checkpoint, progress=print if groups.get_rank() == 0 else None)
-        configure_model(model, cfg)
+        model.configure_attention(cfg)
         model = wrap_model(model, cfg)
         compiled = False
         local = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))

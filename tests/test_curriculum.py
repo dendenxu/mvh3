@@ -1,22 +1,32 @@
 from pathlib import Path
-import json
 
 import torch
-import yaml
 
-from dataset.curriculum import short_mono_windows
 from h3.modules.masking import CLEAN, CONDITION, NOISY, TokenLayout
+from utils.h3_wrapper import source_documents
 
 
-def test_all_views_and_tails_retained():
+def test_all_views_and_tails_retained(monkeypatch):
     counts = [297, 77, 10, 150]
-    windows = short_mono_windows(counts)
-    for view, count in enumerate(counts):
+    views = []
+    for index, count in enumerate(counts):
+        frames = torch.arange(count)
+        views.append(dict(source_view=index, pixels=frames, pose=frames, projection=frames, inverse=frames))
+    monkeypatch.setattr("utils.h3_wrapper.extract_views", lambda sample: views)
+    documents = source_documents({"cpu": {"parquet": "source.parquet"}}, stage=1, short_frames=77)
+    assert [[v["source_view"] for v in doc["views"]] for doc in documents] == [[0, 1, 2, 3], [0, 3], [0], [0]]
+    assert all(doc["isolated"] and doc["source"] == "source.parquet" for doc in documents)
+    for index, count in enumerate(counts):
         covered = []
-        for window in windows:
-            if window.view == view:
-                assert 0 < window.frame_count <= 77
-                covered.extend(range(window.start, window.stop))
+        for doc in documents:
+            for view in doc["views"]:
+                if view["source_view"] != index:
+                    continue
+                frames = view["pixels"]
+                assert 0 < len(frames) <= 77 and view["source_start"] == int(frames[0])
+                for name in ("pose", "projection", "inverse"):
+                    torch.testing.assert_close(view[name], frames, rtol=0, atol=0)
+                covered.extend(frames.tolist())
         assert covered == list(range(count))
 
 

@@ -24,12 +24,13 @@ model/packing.py                        # text/video tokens, masks and camera/ti
 pipeline/inference.py                   # image/camera requests -> raw/EMA sampling -> saved videos
 pipeline/ar_inference.py                # chunk rollout, Euler/UniPC, CFG and KV history
 pipeline/joint_inference.py             # native full-sequence sampler and initialization control
-h3/modules/model.py                     # native packed video/text/audio transformer
+h3/modules/model.py                     # native transformer, camera modes and trainable attention
 h3/modules/attention.py                 # SDPA and compiled flex kernels
 h3/modules/camera.py                    # matrix and decomposed PRoPE
 h3/modules/vae.py                       # CNN encoder, ViT decoder, tiling and stitching
 h3/distributed/fsdp.py                  # FSDP, Ulysses, checkpointing, compilation
-h3/utils/                               # native scheduler and WorldViews UniPC/DPM
+h3/utils/training.py                    # optimizer parameter groups and flow-loss validation
+h3/utils/                               # native scheduler and WorldViews UniPC
 h3/checkpoint.py                        # strict original-weight streaming conversion
 utils/h3_wrapper.py                     # pixels/cameras -> H3 latents and Qwen features
 utils/checkpoint.py                     # atomic sharded AdamW/weight/runtime checkpoints
@@ -42,7 +43,10 @@ tests/                                  # numerical and behavioral regression te
 Read `main.py` -> `Trainer.train_loop` -> `SourceStream.next` ->
 `WorldViewsObjective` for the training path. `SequencePacker` handles tensor
 layout separately from the noise/loss policy. Both inference entry points call
-`pipeline.inference.run`. The [code guide](docs/MVH3.md) explains the interfaces
+`pipeline.inference.run`. For the network, start with `MiniMaxH3Transformer3DModel`
+in `h3/modules/model.py`: `__init__` defines layers, `configure_attention` selects
+camera modes and trainable weights, and `forward` runs the network.
+The [code guide](docs/MVH3.md) explains the interfaces
 and config chain; [experiment history](docs/EXPERIMENTS.md) keeps dated results.
 
 ## Recipe

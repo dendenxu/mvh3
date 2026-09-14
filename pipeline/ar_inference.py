@@ -3,8 +3,9 @@
 import torch
 
 from h3.modules.kv_cache import make_caches
-from model.diffusion import WorldViewsObjective, view_chunk_ids, unpatchify
-from h3.packing import patchify
+from model.diffusion import WorldViewsObjective
+from model.chunks import view_chunk_ids
+from h3.packing import patchify, unpatchify
 from utils.distributed import broadcast_scoped
 from h3.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from h3.utils.scheduler import MiniMaxH3Scheduler
