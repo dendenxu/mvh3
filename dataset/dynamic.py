@@ -14,30 +14,29 @@
 #   - sets `batch['cpu']['view_isolated'] = True` so the trainer/model take the
 #     view-isolated path. Other dataset types are unaffected.
 
-from typing import List
 import os
 import random
-import torch
+from os.path import basename, isabs, isdir, isfile, join
+from typing import List
+
 import numpy as np
-
+import torch
 from torch.utils.data import get_worker_info
-from torch.utils.data._utils.collate import default_collate
 
-from utils.console import *
-from utils.distributed import get_rank
-from utils.distributed import is_main_process
-from utils.distributed import is_node_main
-from utils.video import TorchCodecVideoReader
-from utils.misc import set_seed
-from dataset.mvgame import pack_factory
-from dataset.mvgame import make_strip_pack
-from dataset.mvgame import normalize_cam_translation
-from dataset.mvgame import select_pose_stable_factor
-from dataset.mvgame import compute_sequence_gamma
-from dataset.mvgame import LOOSE_EXPOSURE_BAND
-from dataset.static import StaticDataset
-from dataset.static import parse_pose_column
 from dataset.fps_remap import resolve_fps_remap
+from dataset.mvgame import (
+    LOOSE_EXPOSURE_BAND,
+    compute_sequence_gamma,
+    make_strip_pack,
+    normalize_cam_translation,
+    pack_factory,
+    select_pose_stable_factor,
+)
+from dataset.static import StaticDataset, parse_pose_column
+from utils.console import green, log, red, stacktrace, yellow
+from utils.distributed import get_rank, is_node_main
+from utils.random import set_seed
+from utils.video import TorchCodecVideoReader
 
 
 class DynamicDataset(StaticDataset):
@@ -54,14 +53,15 @@ class DynamicDataset(StaticDataset):
     policy in dataset/static.py StaticDataset's docstring (case 1b).
     """
 
-    def __init__(self, *args, fps_targets=None, dynamic_gen_size=0, dynamic_mv_size=None,
-                 short_paths=None, **kwargs):
+    def __init__(
+        self, *args, fps_targets=None, dynamic_gen_size=0, dynamic_mv_size=None, short_paths=None, **kwargs
+    ):
         # Must set fps_targets + dynamic_gen_size + dynamic_mv_size + short_paths
         # BEFORE super().__init__ so StaticDataset's is_sample_viable() filter
         # sees them when computing the per-row viability threshold.
         self.fps_targets = fps_targets  # explicit fps target list, e.g. [16]; None = default graded fallback
         self.dynamic_gen_size = dynamic_gen_size  # gen_size used in dynamic path (falling back from static); 0 = use self.gen_size
-        self.dynamic_mv_size = dynamic_mv_size    # mv_size used in dynamic path (falling back from static); None = use self.mv_size
+        self.dynamic_mv_size = dynamic_mv_size  # mv_size used in dynamic path (falling back from static); None = use self.mv_size
         # short_paths: list of (mv, gen_size) tuples, tried as a graded
         # rescue chain when the main multi-video path can't pick `mv_size`
         # videos at `dynamic_gen_size`. e.g. [[4, 20], [10, 10]] tries
@@ -85,9 +85,9 @@ class DynamicDataset(StaticDataset):
         # DynamicDataset is weighted on the same tfs unit as the rest — otherwise
         # its longer dynamic clip (dynamic_gen_size, e.g. 75 vs gen_size 20)
         # inflates tfs ~3.9x and silently under-weights all dynamic data ~2.2x.
-        self.eff_gen_size = kwargs.get('gen_size')
+        self.eff_gen_size = kwargs.get("gen_size")
         if type(self) is DynamicDataset and dynamic_gen_size:
-            kwargs['gen_size'] = dynamic_gen_size
+            kwargs["gen_size"] = dynamic_gen_size
         # Same for mv: pure DynamicDataset's single path uses dynamic_mv_size AS
         # the mv_size (e.g. mv=1 long single-view main at dynamic_gen_size, then
         # laddering down through short_paths as the anchor gets shorter). Falls
@@ -95,15 +95,17 @@ class DynamicDataset(StaticDataset):
         # Dataset is excluded (type check): its static path keeps mv_size, and its
         # dynamic fallback already applies dynamic_mv_size in handle_static_exhausted.
         if type(self) is DynamicDataset and dynamic_mv_size is not None:
-            kwargs['mv_size'] = dynamic_mv_size
+            kwargs["mv_size"] = dynamic_mv_size
         super().__init__(*args, **kwargs)
         # Path-keyed video reader cache (since each getitem accesses arbitrary rows,
         # not the per-shard fixed set that StaticDataset assumes).
         self.dyn_video_readers = {}
 
         if is_node_main():
-            log(f'DynamicDataset: {green(len(self.metadata))} videos, mv_size={self.mv_size}, '
-                f'each sample picks {self.mv_size} independent videos')
+            log(
+                f"DynamicDataset: {green(len(self.metadata))} videos, mv_size={self.mv_size}, "
+                f"each sample picks {self.mv_size} independent videos"
+            )
 
     # NOTE: we intentionally do NOT override init_loader anymore.
     #
@@ -136,8 +138,10 @@ class DynamicDataset(StaticDataset):
         # dynamic_gen_size in __init__, which would penalize it ~2.2x vs the
         # static/mv datasets that keep gen_size. eff_gen_size is set in __init__.
         tfs = (self.eff_gen_size or self.gen_size) * self.vae_stride_t - 3
-        nf = np.array([m.get('num_frames', 0) or 0 for m in self.metadata], dtype=np.float64)
-        fps = np.array([m.get('fps', self.model_fps) or self.model_fps for m in self.metadata], dtype=np.float64)
+        nf = np.array([m.get("num_frames", 0) or 0 for m in self.metadata], dtype=np.float64)
+        fps = np.array(
+            [m.get("fps", self.model_fps) or self.model_fps for m in self.metadata], dtype=np.float64
+        )
         total = np.sum(nf / fps) * self.model_fps
         return max(1, int(total / tfs / 8))
 
@@ -147,15 +151,17 @@ class DynamicDataset(StaticDataset):
         if vr is None:
             if isfile(abs_path):
                 video_file = abs_path
-            elif isfile(abs_path + '.mp4'):
-                video_file = abs_path + '.mp4'
+            elif isfile(abs_path + ".mp4"):
+                video_file = abs_path + ".mp4"
             elif isdir(abs_path):
-                video_files = sorted([f for f in os.listdir(abs_path) if f.endswith(('.mp4', '.avi', '.mov'))])
+                video_files = sorted(
+                    [f for f in os.listdir(abs_path) if f.endswith((".mp4", ".avi", ".mov"))]
+                )
                 if not video_files:
-                    raise FileNotFoundError(f'No video file found in {abs_path}')
+                    raise FileNotFoundError(f"No video file found in {abs_path}")
                 video_file = join(abs_path, video_files[0])
             else:
-                raise FileNotFoundError(f'Video path not found: {abs_path}')
+                raise FileNotFoundError(f"Video path not found: {abs_path}")
             # Construct via the config-selected reader class inherited from
             # StaticDataset.__init__ (`video_reader` cfg → TorchCodecVideoReader
             # or CFRVideoReader), NOT the TorchCodecVideoReader imported above —
@@ -169,8 +175,15 @@ class DynamicDataset(StaticDataset):
             return video_path
         return join(self.data_root, video_path)
 
-    def load_one_video_view(self, meta_row, target_h: int, target_w: int,
-                              total_frame_size: int, fps_ratio: float, aug_kwargs: dict):
+    def load_one_video_view(
+        self,
+        meta_row,
+        target_h: int,
+        target_w: int,
+        total_frame_size: int,
+        fps_ratio: float,
+        aug_kwargs: dict,
+    ):
         """Load a single video as one view.
 
         Returns (view_data, prompt_embed, caption, resolved_video_path, seg_start).
@@ -180,11 +193,11 @@ class DynamicDataset(StaticDataset):
         the sidecar needs to reproduce this view later.
         """
         # Resolve path & get reader
-        video_path = self.resolve_video_path(meta_row['video_path'])
+        video_path = self.resolve_video_path(meta_row["video_path"])
         vr = self.get_video_reader_for_path(video_path)
 
         # Lazy-load camera params for this row's pose_idx
-        pose_idx = meta_row['pose_idx']
+        pose_idx = meta_row["pose_idx"]
         if pose_idx not in self.camera_params:
             self.load_poses([pose_idx])
         # camera_params stores raw flat array; parse + normalize on access
@@ -210,9 +223,9 @@ class DynamicDataset(StaticDataset):
         if abs(n_cam - n_vid) <= 1:
             full_src = min(n_vid, n_cam)  # aligned datasets, preserves old behavior
         else:
-            full_src = n_vid              # windowed-pose or subsampled-pose: use video length
-        frame_start = int(meta_row.get('frame_start') or 0)
-        frame_end = meta_row.get('frame_end')
+            full_src = n_vid  # windowed-pose or subsampled-pose: use video length
+        frame_start = int(meta_row.get("frame_start") or 0)
+        frame_end = meta_row.get("frame_end")
         frame_end_eff = full_src if (frame_end is None or frame_end <= 0) else min(int(frame_end), full_src)
         n_frames_src = max(0, frame_end_eff - frame_start)
         src_frame_size = int(round(total_frame_size * fps_ratio))
@@ -246,14 +259,19 @@ class DynamicDataset(StaticDataset):
         # gamma. No-op outside the extreme dark/overexposed tails.
         gamma_value = 1.0
         if self.exposure_clamp:
-            win_inds = np.linspace(frame_start, frame_start + n_frames_src - 1,
-                                   num=min(8, n_frames_src)).astype(np.int64)
+            win_inds = np.linspace(
+                frame_start, frame_start + n_frames_src - 1, num=min(8, n_frames_src)
+            ).astype(np.int64)
             gamma_value = compute_sequence_gamma([vr], win_inds, 1, 1, band=LOOSE_EXPOSURE_BAND)
 
         view_data = self.load_view(
-            vr, cameras, seg_frame_inds,
-            target_h, target_w,
-            R0=None, T0=None,
+            vr,
+            cameras,
+            seg_frame_inds,
+            target_h,
+            target_w,
+            R0=None,
+            T0=None,
             frame_start=frame_start,
             n_frames_src=n_frames_src,
             gamma_value=gamma_value,
@@ -264,16 +282,21 @@ class DynamicDataset(StaticDataset):
         # H3 re-encodes the raw caption with Qwen3; Wan/T5 caches are incompatible.
         embed = torch.empty((0, 5120), dtype=torch.bfloat16)
 
-
         # Return seg_start in original source frame space (window-offset added)
         # so callers (batch['cpu']['start_frames']) get a frame index that points
         # at the actual mp4, not a window-local offset.
         # Also return the parquet row (pose_idx) and the last source frame index
         # (seg_frame_inds is monotonic, so [-1] is the max) so callers can surface
         # (row, start, end) on the vis meta panel.
-        return (view_data, embed, meta_row.get('caption', ''), video_path,
-                int(seg_start + frame_start), int(meta_row['pose_idx']),
-                int(seg_frame_inds[-1]))
+        return (
+            view_data,
+            embed,
+            meta_row.get("caption", ""),
+            video_path,
+            int(seg_start + frame_start),
+            int(meta_row["pose_idx"]),
+            int(seg_frame_inds[-1]),
+        )
 
     def try_long_single_view(self, anchor_meta: dict, aug_kwargs: dict):
         """Single-video, mv=1, gen_size=long_gen_size sample.
@@ -291,10 +314,10 @@ class DynamicDataset(StaticDataset):
         # mv=1 pack: [1,1] layout, full-resolution single view.
         pack = pack_factory[1]
         pack = {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in pack.items()}
-        target_h = int(self.height * pack['rs'][0])
-        target_w = int(self.width * pack['rs'][0])
+        target_h = int(self.height * pack["rs"][0])
+        target_w = int(self.width * pack["rs"][0])
 
-        src_fps = float(anchor_meta.get('fps', self.model_fps))
+        src_fps = float(anchor_meta.get("fps", self.model_fps))
         # Factory-snapped primary tier; native fps fallback only allowed in
         # graded mode (self.fps_targets is None — used by StaticDynamicDataset's
         # dynamic fallback). Strict mode (fps_targets=[16] for pure
@@ -313,8 +336,12 @@ class DynamicDataset(StaticDataset):
         for ratio, level_em in tiers:
             try:
                 result = self.load_one_video_view(
-                    anchor_meta, target_h, target_w,
-                    long_tfs, ratio, aug_kwargs,
+                    anchor_meta,
+                    target_h,
+                    target_w,
+                    long_tfs,
+                    ratio,
+                    aug_kwargs,
                 )
             except Exception:
                 result = None
@@ -329,54 +356,60 @@ class DynamicDataset(StaticDataset):
         view_data, embed, caption, video_path, seg_start, row_idx, seg_end = result
         effective_fps = int(round(level_eff_model)) if fps_ratio > 1.0 else int(round(src_fps))
 
-        batch = {'cpu': {}}
-        batch['mv'] = 1
-        batch['cpu']['prompts'] = caption
+        batch = {"cpu": {}}
+        batch["mv"] = 1
+        batch["cpu"]["prompts"] = caption
         # Single view: scalar `video_path` is canonical; build_meta_dicts and the
         # error logs fall back to it, so no redundant (and default_collate-
         # transposed) `video_paths` list here. The view_as_batch path keeps
         # `video_paths` because there it is genuinely per-view.
-        batch['cpu']['video_path'] = video_path
-        batch['cpu']['dataset_name'] = self.dataset_name
-        batch['cpu']['parquet'] = basename(self.data_path)
-        batch['cpu']['start_frames'] = np.asarray([seg_start], dtype=np.int64)
-        batch['cpu']['end_frames'] = np.asarray([seg_end], dtype=np.int64)
-        batch['cpu']['rows'] = np.asarray([row_idx], dtype=np.int64)
-        batch['cpu']['fps_ratios'] = np.asarray([fps_ratio], dtype=np.float32)
-        batch['cpu']['aug_kwargs'] = dict(aug_kwargs)
-        batch['fps'] = effective_fps
-        batch['prompt_embeds'] = embed  # [L, D] — static-style single-view shape
+        batch["cpu"]["video_path"] = video_path
+        batch["cpu"]["dataset_name"] = self.dataset_name
+        batch["cpu"]["parquet"] = basename(self.data_path)
+        batch["cpu"]["start_frames"] = np.asarray([seg_start], dtype=np.int64)
+        batch["cpu"]["end_frames"] = np.asarray([seg_end], dtype=np.int64)
+        batch["cpu"]["rows"] = np.asarray([row_idx], dtype=np.int64)
+        batch["cpu"]["fps_ratios"] = np.asarray([fps_ratio], dtype=np.float32)
+        batch["cpu"]["aug_kwargs"] = dict(aug_kwargs)
+        batch["fps"] = effective_fps
+        batch["prompt_embeds"] = embed  # [L, D] — static-style single-view shape
 
         # NOT setting view_isolated: mv=1 collapses to the standard path.
-        batch['frames'] = view_data['frames']  # [F, 3, H, W]
+        batch["frames"] = view_data["frames"]  # [F, 3, H, W]
         # mv=1 stack-and-reshape is a no-op shape-wise; keep the form for
         # symmetry with multi-view batches.
-        batch['projs'] = torch.stack([view_data['projs']], dim=1).reshape(-1, 4, 4)
-        batch['projs_inv'] = torch.stack([view_data['projs_inv']], dim=1).reshape(-1, 4, 4)
-        batch['Ks'] = torch.stack([view_data['Ks']], dim=1).reshape(-1, 3, 3)
-        batch['Rs'] = torch.stack([view_data['Rs']], dim=1).reshape(-1, 3, 3)
-        batch['Ts'] = torch.stack([view_data['Ts']], dim=1).reshape(-1, 3, 1)
+        batch["projs"] = torch.stack([view_data["projs"]], dim=1).reshape(-1, 4, 4)
+        batch["projs_inv"] = torch.stack([view_data["projs_inv"]], dim=1).reshape(-1, 4, 4)
+        batch["Ks"] = torch.stack([view_data["Ks"]], dim=1).reshape(-1, 3, 3)
+        batch["Rs"] = torch.stack([view_data["Rs"]], dim=1).reshape(-1, 3, 3)
+        batch["Ts"] = torch.stack([view_data["Ts"]], dim=1).reshape(-1, 3, 1)
 
         # Pose stable factor — single-view: size by MAX |T| (farthest point on the
         # camera trajectory from the anchor), not mean drift; the far point is what
         # overflows bf16 PRoPE (score ≈ 2.4 * T², need T < ~5).
-        R_v, T_v = view_data['Rs'], view_data['Ts']
+        R_v, T_v = view_data["Rs"], view_data["Ts"]
         centers_v = -torch.bmm(R_v.mT, T_v).squeeze(-1)
         pose_stable_factor, pose_max_t = select_pose_stable_factor(centers_v, self.pose_stable_factors)
         if pose_stable_factor != 1.0:
-            batch['projs'][:, :3, 3] /= pose_stable_factor
-            batch['projs_inv'][:, :3, 3] /= pose_stable_factor
-            batch['Ts'] /= pose_stable_factor
+            batch["projs"][:, :3, 3] /= pose_stable_factor
+            batch["projs_inv"][:, :3, 3] /= pose_stable_factor
+            batch["Ts"] /= pose_stable_factor
 
-        batch['cpu']['pack'] = pack
-        batch['cpu']['pack']['width'] = self.width
-        batch['cpu']['pack']['height'] = self.height
-        batch['cpu']['pose_stable_factor'] = pose_stable_factor
-        batch['cpu']['pose_max_t'] = pose_max_t  # pre-division max pairwise dist (bf16 diagnostic)
+        batch["cpu"]["pack"] = pack
+        batch["cpu"]["pack"]["width"] = self.width
+        batch["cpu"]["pack"]["height"] = self.height
+        batch["cpu"]["pose_stable_factor"] = pose_stable_factor
+        batch["cpu"]["pose_max_t"] = pose_max_t  # pre-division max pairwise dist (bf16 diagnostic)
         return batch
 
-    def try_view_iso(self, target_mv: int, total_latent_size: int, aug_kwargs: dict,
-                      anchor_meta: dict = None, force_strip: bool = False):
+    def try_view_iso(
+        self,
+        target_mv: int,
+        total_latent_size: int,
+        aug_kwargs: dict,
+        anchor_meta: dict = None,
+        force_strip: bool = False,
+    ):
         """View-isolated multi-video sampling helper.
 
         Picks `target_mv` rows and loads each as one independent view at
@@ -402,12 +435,14 @@ class DynamicDataset(StaticDataset):
         # uses [1,4]; mv=10 uses [1,10]. gather_mixed_batch tolerates per-rank
         # shape differences, so co-training with mixed mv values is OK — each
         # rank just produces a different-shape sample, broadcast individually.
-        pack = make_strip_pack(target_mv) if (self.shape_pool_active or force_strip) else pack_factory[target_mv]
+        pack = (
+            make_strip_pack(target_mv) if (self.shape_pool_active or force_strip) else pack_factory[target_mv]
+        )
         pack = {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in pack.items()}
-        pack_size = pack['pack_size']
-        ratios = pack['rs']
-        xs = pack['xs']
-        ys = pack['ys']
+        pack_size = pack["pack_size"]
+        ratios = pack["rs"]
+        xs = pack["xs"]
+        ys = pack["ys"]
 
         height_pack = int(self.height * pack_size[0])
         width_pack = int(self.width * pack_size[1])
@@ -449,7 +484,7 @@ class DynamicDataset(StaticDataset):
         # reversed so pop() yields 1, 2, …, mv-1 — byte-identical fill order.
         # No random fallback so a missing row hard-fails instead of silently
         # substituting.
-        force_order = bool(getattr(self, '_replay_force_row_order', False))
+        force_order = bool(getattr(self, "_replay_force_row_order", False))
         if force_order:
             row_pool = list(range(1, n_meta))[::-1]
         else:
@@ -476,16 +511,16 @@ class DynamicDataset(StaticDataset):
             else:
                 if force_order:
                     raise RuntimeError(
-                        'try_view_iso replay (force_order=True) exhausted its '
-                        'pre-ordered row pool — a pinned row failed to load. '
-                        'Replay assumes the original training succeeded with '
-                        'these exact rows; a load failure here means the data '
-                        'or config has drifted since the original step.'
+                        "try_view_iso replay (force_order=True) exhausted its "
+                        "pre-ordered row pool — a pinned row failed to load. "
+                        "Replay assumes the original training succeeded with "
+                        "these exact rows; a load failure here means the data "
+                        "or config has drifted since the original step."
                     )
                 row_idx = random.randrange(n_meta)
                 meta_row = self.sharded_metadata[row_idx]
 
-            src_fps = float(meta_row.get('fps', self.model_fps))
+            src_fps = float(meta_row.get("fps", self.model_fps))
             # Factory-snapped primary tier; native fps fallback only allowed in
             # graded mode (fps_targets is None — used by StaticDynamicDataset's
             # dynamic fallback). Strict mode (fps_targets=[16] for pure
@@ -505,13 +540,21 @@ class DynamicDataset(StaticDataset):
             for ratio, level_em in tiers:
                 try:
                     result = self.load_one_video_view(
-                        meta_row, target_h, target_w,
-                        total_frame_size, ratio, aug_kwargs,
+                        meta_row,
+                        target_h,
+                        target_w,
+                        total_frame_size,
+                        ratio,
+                        aug_kwargs,
                     )
                 except Exception as e:
                     if attempts <= 3:
-                        log(yellow(f"DynamicDataset: load_one_video_view failed for "
-                                   f"{meta_row.get('video_path', '?')}: {type(e).__name__}: {e}"))
+                        log(
+                            yellow(
+                                f"DynamicDataset: load_one_video_view failed for "
+                                f"{meta_row.get('video_path', '?')}: {type(e).__name__}: {e}"
+                            )
+                        )
                     # CAVEAT (2026-05-28 audit): exception logged only for first 3
                     # attempts per anchor; subsequent failures silent. If 100% of
                     # pool fails (broken parquet, missing embeds, codec error), the
@@ -537,23 +580,21 @@ class DynamicDataset(StaticDataset):
             if view_as_batch:
                 # Each view kept as its own [F, 3, H, W] tensor; stacked at the
                 # end so collate_fn can flatten leading [B, mv] → batch dim.
-                frames_list.append(view_data['frames'])
+                frames_list.append(view_data["frames"])
             else:
-                h_v, w_v = view_data['frames'].shape[-2:]
+                h_v, w_v = view_data["frames"].shape[-2:]
                 px = int(xs[view_idx] * self.width)
                 py = int(ys[view_idx] * self.height)
-                frames[:, :, py:py + h_v, px:px + w_v] = view_data['frames']
+                frames[:, :, py : py + h_v, px : px + w_v] = view_data["frames"]
 
-            projs_list.append(view_data['projs'])
-            projs_inv_list.append(view_data['projs_inv'])
-            Ks_list.append(view_data['Ks'])
-            Rs_list.append(view_data['Rs'])
-            Ts_list.append(view_data['Ts'])
+            projs_list.append(view_data["projs"])
+            projs_inv_list.append(view_data["projs_inv"])
+            Ks_list.append(view_data["Ks"])
+            Rs_list.append(view_data["Rs"])
+            Ts_list.append(view_data["Ts"])
             embeds_list.append(embed)
             captions_list.append(caption)
-            effective_fps_list.append(
-                int(round(level_eff_model)) if fps_ratio > 1.0 else int(round(src_fps))
-            )
+            effective_fps_list.append(int(round(level_eff_model)) if fps_ratio > 1.0 else int(round(src_fps)))
             video_paths_list.append(view_video_path)
             start_frames_list.append(view_seg_start)
             end_frames_list.append(view_seg_end)
@@ -566,76 +607,76 @@ class DynamicDataset(StaticDataset):
         if picked < target_mv:
             return None
 
-        batch = {'cpu': {}}
-        batch['cpu']['video_path'] = video_paths_list[0]
-        batch['cpu']['video_paths'] = list(video_paths_list)
+        batch = {"cpu": {}}
+        batch["cpu"]["video_path"] = video_paths_list[0]
+        batch["cpu"]["video_paths"] = list(video_paths_list)
         # Per-view parquet (same file for all views). Length-mv so view_as_batch
         # collate folds it sample-major to B*mv (mirrors video_paths) → shows on
         # every view panel. With video_paths, grep the basename to find the row.
-        batch['cpu']['parquets'] = [basename(self.data_path)] * len(video_paths_list)
-        batch['cpu']['start_frames'] = np.asarray(start_frames_list, dtype=np.int64)
+        batch["cpu"]["parquets"] = [basename(self.data_path)] * len(video_paths_list)
+        batch["cpu"]["start_frames"] = np.asarray(start_frames_list, dtype=np.int64)
         # Per-view source-frame end + parquet row (length-mv → view_as_batch
         # collate folds them sample-major to B*mv, one per view panel; in the
         # strip path each view is a DIFFERENT row, unlike static/multiview).
-        batch['cpu']['end_frames'] = np.asarray(end_frames_list, dtype=np.int64)
-        batch['cpu']['rows'] = np.asarray(rows_list, dtype=np.int64)
-        batch['cpu']['fps_ratios'] = np.asarray(fps_ratios_list, dtype=np.float32)
-        batch['cpu']['aug_kwargs'] = dict(aug_kwargs)
-        batch['fps'] = int(round(sum(effective_fps_list) / len(effective_fps_list)))
+        batch["cpu"]["end_frames"] = np.asarray(end_frames_list, dtype=np.int64)
+        batch["cpu"]["rows"] = np.asarray(rows_list, dtype=np.int64)
+        batch["cpu"]["fps_ratios"] = np.asarray(fps_ratios_list, dtype=np.float32)
+        batch["cpu"]["aug_kwargs"] = dict(aug_kwargs)
+        batch["fps"] = int(round(sum(effective_fps_list) / len(effective_fps_list)))
 
         if view_as_batch:
             # Layout: leading dim = mv; collate_fn flattens [B, mv, ...] → [B*mv, ...]
             # so prepare_batch sees a B*mv batch of plain single-view samples.
-            batch['mv'] = 1
-            batch['cpu']['view_as_batch'] = True
-            batch['cpu']['orig_mv'] = target_mv  # for logging only
-            batch['cpu']['prompts'] = list(captions_list)            # one caption per view
-            batch['frames'] = torch.stack(frames_list, dim=0)        # [mv, F, 3, H, W]
-            batch['projs'] = torch.stack(projs_list, dim=0)          # [mv, F, 4, 4]
-            batch['projs_inv'] = torch.stack(projs_inv_list, dim=0)  # [mv, F, 4, 4]
-            batch['Ks'] = torch.stack(Ks_list, dim=0)                # [mv, F, 3, 3]
-            batch['Rs'] = torch.stack(Rs_list, dim=0)                # [mv, F, 3, 3]
-            batch['Ts'] = torch.stack(Ts_list, dim=0)                # [mv, F, 3, 1]
-            batch['prompt_embeds'] = torch.stack(embeds_list, dim=0)  # [mv, L, D]
+            batch["mv"] = 1
+            batch["cpu"]["view_as_batch"] = True
+            batch["cpu"]["orig_mv"] = target_mv  # for logging only
+            batch["cpu"]["prompts"] = list(captions_list)  # one caption per view
+            batch["frames"] = torch.stack(frames_list, dim=0)  # [mv, F, 3, H, W]
+            batch["projs"] = torch.stack(projs_list, dim=0)  # [mv, F, 4, 4]
+            batch["projs_inv"] = torch.stack(projs_inv_list, dim=0)  # [mv, F, 4, 4]
+            batch["Ks"] = torch.stack(Ks_list, dim=0)  # [mv, F, 3, 3]
+            batch["Rs"] = torch.stack(Rs_list, dim=0)  # [mv, F, 3, 3]
+            batch["Ts"] = torch.stack(Ts_list, dim=0)  # [mv, F, 3, 1]
+            batch["prompt_embeds"] = torch.stack(embeds_list, dim=0)  # [mv, L, D]
             # mv=1 single-view pack — every batch element packs as a single full view.
             mv1_pack = pack_factory[1]
             mv1_pack = {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in mv1_pack.items()}
-            mv1_pack['width'] = self.width
-            mv1_pack['height'] = self.height
-            mv1_pack['ws'] = np.asarray([self.width], dtype=np.int32)
-            mv1_pack['hs'] = np.asarray([self.height], dtype=np.int32)
-            mv1_pack['xs'] = (mv1_pack['xs'] * self.width).astype(np.int32)
-            mv1_pack['ys'] = (mv1_pack['ys'] * self.height).astype(np.int32)
-            batch['cpu']['pack'] = mv1_pack
+            mv1_pack["width"] = self.width
+            mv1_pack["height"] = self.height
+            mv1_pack["ws"] = np.asarray([self.width], dtype=np.int32)
+            mv1_pack["hs"] = np.asarray([self.height], dtype=np.int32)
+            mv1_pack["xs"] = (mv1_pack["xs"] * self.width).astype(np.int32)
+            mv1_pack["ys"] = (mv1_pack["ys"] * self.height).astype(np.int32)
+            batch["cpu"]["pack"] = mv1_pack
         else:
-            batch['mv'] = target_mv
-            batch['cpu']['view_isolated'] = True
-            batch['cpu']['prompts'] = captions_list[0] if captions_list else ''
-            batch['frames'] = frames
-            batch['projs'] = torch.stack(projs_list, dim=1).reshape(-1, 4, 4)
-            batch['projs_inv'] = torch.stack(projs_inv_list, dim=1).reshape(-1, 4, 4)
-            batch['Ks'] = torch.stack(Ks_list, dim=1).reshape(-1, 3, 3)
-            batch['Rs'] = torch.stack(Rs_list, dim=1).reshape(-1, 3, 3)
-            batch['Ts'] = torch.stack(Ts_list, dim=1).reshape(-1, 3, 1)
-            batch['prompt_embeds'] = torch.stack(embeds_list, dim=0)
-            batch['cpu']['pack'] = pack
-            batch['cpu']['pack']['width'] = self.width
-            batch['cpu']['pack']['height'] = self.height
+            batch["mv"] = target_mv
+            batch["cpu"]["view_isolated"] = True
+            batch["cpu"]["prompts"] = captions_list[0] if captions_list else ""
+            batch["frames"] = frames
+            batch["projs"] = torch.stack(projs_list, dim=1).reshape(-1, 4, 4)
+            batch["projs_inv"] = torch.stack(projs_inv_list, dim=1).reshape(-1, 4, 4)
+            batch["Ks"] = torch.stack(Ks_list, dim=1).reshape(-1, 3, 3)
+            batch["Rs"] = torch.stack(Rs_list, dim=1).reshape(-1, 3, 3)
+            batch["Ts"] = torch.stack(Ts_list, dim=1).reshape(-1, 3, 1)
+            batch["prompt_embeds"] = torch.stack(embeds_list, dim=0)
+            batch["cpu"]["pack"] = pack
+            batch["cpu"]["pack"]["width"] = self.width
+            batch["cpu"]["pack"]["height"] = self.height
 
         # View-isolated: one global factor must keep EVERY view safe, so size by the
         # global MAX |T| across all views (each view is anchored to its own first
         # frame), not the per-view mean averaged across views.
-        all_centers = torch.cat([
-            -torch.bmm(R_v.mT, T_v).squeeze(-1) for R_v, T_v in zip(Rs_list, Ts_list)
-        ], dim=0)
+        all_centers = torch.cat(
+            [-torch.bmm(R_v.mT, T_v).squeeze(-1) for R_v, T_v in zip(Rs_list, Ts_list)], dim=0
+        )
         pose_stable_factor, pose_max_t = select_pose_stable_factor(all_centers, self.pose_stable_factors)
         if pose_stable_factor != 1.0:
-            batch['projs'][..., :3, 3] /= pose_stable_factor
-            batch['projs_inv'][..., :3, 3] /= pose_stable_factor
-            batch['Ts'] /= pose_stable_factor
+            batch["projs"][..., :3, 3] /= pose_stable_factor
+            batch["projs_inv"][..., :3, 3] /= pose_stable_factor
+            batch["Ts"] /= pose_stable_factor
 
-        batch['cpu']['pose_stable_factor'] = pose_stable_factor
-        batch['cpu']['pose_max_t'] = pose_max_t  # pre-division max pairwise dist (bf16 diagnostic)
+        batch["cpu"]["pose_stable_factor"] = pose_stable_factor
+        batch["cpu"]["pose_max_t"] = pose_max_t  # pre-division max pairwise dist (bf16 diagnostic)
 
         return batch
 
@@ -644,32 +685,39 @@ class DynamicDataset(StaticDataset):
         n_meta = len(self.sharded_metadata)
         if n_meta == 0:
             raise RuntimeError(
-                f'{type(self).__name__} has no usable samples after length '
-                f'prefilter — should never be picked by DatasetAggregator '
-                f'(weight=0). Check data_path={self.data_path}'
+                f"{type(self).__name__} has no usable samples after length "
+                f"prefilter — should never be picked by DatasetAggregator "
+                f"(weight=0). Check data_path={self.data_path}"
             )
 
         while True:
             seed = idx // n_meta
-            seed = seed % (2 ** 32 - 1)
+            seed = seed % (2**32 - 1)
             set_seed(seed)
             self.last_seed = int(seed)
             local_idx = idx % n_meta
 
             anchor_meta = self.sharded_metadata[local_idx]
-            n_anchor = anchor_meta.get('num_frames', 0)
+            n_anchor = anchor_meta.get("num_frames", 0)
             if isinstance(n_anchor, list):
                 n_anchor = min(n_anchor) if n_anchor else 0
 
             disable_aug = random.random() < self.disable_augmentation_ratio or self.overfit
             if disable_aug:
-                aug_kwargs = dict(s_min=1.0, s_max=1.0, cx_min=0.0, cx_max=0.0,
-                                  cy_min=0.0, cy_max=0.0, r_min=0.0, r_max=0.0)
+                aug_kwargs = dict(
+                    s_min=1.0, s_max=1.0, cx_min=0.0, cx_max=0.0, cy_min=0.0, cy_max=0.0, r_min=0.0, r_max=0.0
+                )
             else:
-                aug_kwargs = dict(s_min=0.65, s_max=1.25,
-                                  cx_min=-0.1, cx_max=0.1,
-                                  cy_min=-0.1, cy_max=0.1,
-                                  r_min=-15.0, r_max=15.0)
+                aug_kwargs = dict(
+                    s_min=0.65,
+                    s_max=1.25,
+                    cx_min=-0.1,
+                    cx_max=0.1,
+                    cy_min=-0.1,
+                    cy_max=0.1,
+                    r_min=-15.0,
+                    r_max=15.0,
+                )
             aug_kwargs.update(kwargs)
 
             long_tfs = self.long_gen_size * self.vae_stride_t - 3 if self.long_gen_size > 0 else 0
@@ -681,8 +729,9 @@ class DynamicDataset(StaticDataset):
                     return long_batch
 
             if n_anchor >= main_tfs:
-                main_batch = self.try_view_iso(self.mv_size, self.gen_size, aug_kwargs,
-                                                anchor_meta=anchor_meta)
+                main_batch = self.try_view_iso(
+                    self.mv_size, self.gen_size, aug_kwargs, anchor_meta=anchor_meta
+                )
                 if main_batch is not None:
                     return main_batch
 
@@ -690,15 +739,18 @@ class DynamicDataset(StaticDataset):
                 short_tfs = short_gen * self.vae_stride_t - 3
                 if n_anchor < short_tfs:
                     continue
-                short_batch = self.try_view_iso(short_mv, short_gen, aug_kwargs,
-                                                 anchor_meta=anchor_meta, force_strip=True)
+                short_batch = self.try_view_iso(
+                    short_mv, short_gen, aug_kwargs, anchor_meta=anchor_meta, force_strip=True
+                )
                 if short_batch is not None:
                     return short_batch
 
-            log(yellow(
-                f"DynamicDataset: anchor {anchor_meta.get('video_path', '?')} "
-                f"exhausted all paths (nf={n_anchor}), advancing idx"
-            ))
+            log(
+                yellow(
+                    f"DynamicDataset: anchor {anchor_meta.get('video_path', '?')} "
+                    f"exhausted all paths (nf={n_anchor}), advancing idx"
+                )
+            )
             # CAVEAT (2026-05-28 audit): `idx = local_idx + 1` re-enters the
             # while-loop where `seed = idx // n_meta`. For local_idx + 1 < n_meta
             # this collapses retry seed to 0 regardless of original idx, biasing
@@ -718,14 +770,16 @@ class DynamicDataset(StaticDataset):
         try:
             self.shape_pool_active = False
             batch = self.getitem_impl(idx)
-            batch['cpu']['seed'] = int(self.last_seed)
+            batch["cpu"]["seed"] = int(self.last_seed)
             return batch
         except Exception as e:
             wi = get_worker_info()
-            log(red(
-                f"[DynamicDataset __getitem__] failed: rank={get_rank()} "
-                f"worker={wi.id if wi is not None else 0} idx={idx} err={e}"
-            ))
+            log(
+                red(
+                    f"[DynamicDataset __getitem__] failed: rank={get_rank()} "
+                    f"worker={wi.id if wi is not None else 0} idx={idx} err={e}"
+                )
+            )
             stacktrace()
             raise
 
@@ -735,6 +789,7 @@ class DynamicDataset(StaticDataset):
         per-sample flag). Provided here so single-`type: dynamic` configs
         (no aggregator wrap) still get the flatten."""
         from dataset.aggregator import view_as_batch_collate
+
         return view_as_batch_collate(samples)
 
 
@@ -762,7 +817,7 @@ class StaticDynamicDataset(DynamicDataset):
 
     def __init__(self, *args, **kwargs):
         # Force graded fps fallback — ignore any top-level fps_targets.
-        kwargs['fps_targets'] = None
+        kwargs["fps_targets"] = None
         super().__init__(*args, **kwargs)
 
     def __getitem__(self, idx: int):

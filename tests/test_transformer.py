@@ -2,13 +2,11 @@ import io
 
 import pytest
 import torch
-
 from diffusers import MiniMaxH3Transformer3DModel
+from fixtures_h3 import attention_parameters, flow_matching_loss, parameter_signature, tiny_model
+
 from h3 import MVH3Transformer3DModel
 from h3.modules.masking import CLEAN, CONDITION, NOISY, TokenLayout
-from h3.utils.training import attention_parameters, flow_matching_loss, parameter_signature
-
-from fixtures_h3 import tiny_model
 
 
 def inputs(audio_tokens=0, batch=2):
@@ -23,7 +21,7 @@ def inputs(audio_tokens=0, batch=2):
     pose = torch.zeros(batch, 2, 10)
     pose[..., :2] = 1
     pose[:, 1, 7] = 0.15
-    camera_indices = torch.full((length, ), -1, dtype=torch.long)
+    camera_indices = torch.full((length,), -1, dtype=torch.long)
     camera_indices[video_indices] = torch.tensor([0, 0, 1, 1, 0, 0, 1, 1])
     return dict(
         hidden_states=torch.randn(batch, 8, 96),
@@ -96,8 +94,10 @@ def test_existing_attention_update_and_stage_resume(checkpointing):
     assert len(changed) == 18
     assert parameter_signature(model) == signature
     buffer = io.BytesIO()
-    torch.save(dict(model=model.state_dict(), optimizer=optimizer.state_dict(), global_step=12, stage="short_mono"),
-               buffer)
+    torch.save(
+        dict(model=model.state_dict(), optimizer=optimizer.state_dict(), global_step=12, stage="short_mono"),
+        buffer,
+    )
     buffer.seek(0)
     checkpoint = torch.load(buffer, weights_only=True)
     resumed = tiny_model()
@@ -128,8 +128,8 @@ def test_future_media_and_caption_cannot_leak_across_three_blocks():
     torch.manual_seed(7)
     model = tiny_model().eval()
     data = inputs(audio_tokens=2, batch=1)
-    kind = torch.full((13, ), CONDITION, dtype=torch.long)
-    chunk = torch.full((13, ), -1, dtype=torch.long)
+    kind = torch.full((13,), CONDITION, dtype=torch.long)
+    chunk = torch.full((13,), -1, dtype=torch.long)
     scope = torch.zeros(13, dtype=torch.long)
     vi = data["video_indices"]
     kind[vi[:4]], kind[vi[4:]] = CLEAN, NOISY

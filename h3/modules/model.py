@@ -19,13 +19,28 @@ import torch
 import torch.nn as nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from h3.modules.layers import FeedForward, TimestepEmbedding, Timesteps
-from h3.modules.attention import dispatch_attention_fn, compiled_flex_attention
-from h3.utils.model import model_config, get_parameter_dtype, set_gradient_checkpointing
-
-from h3.modules.camera import CameraEncoding, CameraBundle, MatrixCameraEncoding, apply_camera, precompute_camera, camera_projection, matrix_rotary, apply_matrix, relative_projection
-from h3.modules.masking import TokenLayout
 from h3.compile_shapes import pad_camera
+from h3.modules.attention import compiled_flex_attention, dispatch_attention_fn
+from h3.modules.camera import (
+    CameraBundle,
+    CameraEncoding,
+    MatrixCameraEncoding,
+    apply_camera,
+    apply_matrix,
+    camera_projection,
+    matrix_rotary,
+    precompute_camera,
+    relative_projection,
+)
+from h3.modules.layers import (
+    FeedForward,
+    TimestepEmbedding,
+    Timesteps,
+    get_parameter_dtype,
+    set_gradient_checkpointing,
+)
+from h3.modules.masking import TokenLayout
+from utils.config import model_config
 
 # MiniMax-H3 tags every row of the packed sequence with the modality it belongs to and keeps one set of AdaLN
 # modulation parameters per (timestep, modality) pair: 0 = video, 1 = text, 2 = audio.
@@ -50,7 +65,7 @@ class MiniMaxH3TransformerOutput:
     audio_sample: torch.Tensor | None = None
 
 
-def _apply_rotary_emb(hidden_states: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+def apply_rotary_emb(hidden_states: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     r"""
     Rotate the leading `rotary_dim` channels of every head and pass the remaining channels through unchanged.
     `hidden_states` is `(batch_size, seq_len, num_heads, head_dim)` and `cos`/`sin` are `(seq_len, rotary_dim)`.
@@ -79,8 +94,9 @@ class MiniMaxH3RotaryPosEmbed(nn.Module):
     def __init__(self, rope_freq_dim: int = 16, rope_theta: float = 10000.0):
         super().__init__()
         self.rope_freq_dim = rope_freq_dim
-        inv_freq = 1.0 / (rope_theta**(torch.arange(0, 2 * rope_freq_dim, 2, dtype=torch.float32) /
-                                       (2 * rope_freq_dim)))
+        inv_freq = 1.0 / (
+            rope_theta ** (torch.arange(0, 2 * rope_freq_dim, 2, dtype=torch.float32) / (2 * rope_freq_dim))
+        )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -140,13 +156,18 @@ class MiniMaxH3AdaLayerNormOut(nn.Module):
         self.norm = nn.RMSNorm(hidden_size, eps=eps)
         self.linear = nn.Linear(time_embed_dim, 2 * hidden_size, bias=True)
 
-    def forward(self, hidden_states: torch.Tensor, temb: torch.Tensor, timestep_indices: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, temb: torch.Tensor, timestep_indices: torch.Tensor
+    ) -> torch.Tensor:
         # As in `MiniMaxH3AdaLayerNormModulation`: activate at `temb`'s precision, cast to the projection's dtype after.
-        shift, scale = self.linear(nn.functional.silu(temb).to(get_parameter_dtype(self.linear))).chunk(2, dim=-1)
+        shift, scale = self.linear(nn.functional.silu(temb).to(get_parameter_dtype(self.linear))).chunk(
+            2, dim=-1
+        )
         # The modulation itself stays at the block stack's precision; `forward` casts to the output heads' dtype.
         hidden_states = self.norm(hidden_states)
         return hidden_states * (1.0 + scale.index_select(0, timestep_indices)) + shift.index_select(
-            0, timestep_indices)
+            0, timestep_indices
+        )
 
 
 class MiniMaxH3AttnProcessor:
@@ -173,7 +194,9 @@ class MiniMaxH3AttnProcessor:
         update_cache=False,
     ) -> torch.Tensor:
         if self._parallel_config is not None and (camera is not None or attention_mask is not None):
-            raise NotImplementedError("Camera/masked context parallelism needs an explicit sharded-layout adapter")
+            raise NotImplementedError(
+                "Camera/masked context parallelism needs an explicit sharded-layout adapter"
+            )
         if attn.fused_projections:
             query, key, value = attn.to_qkv(hidden_states).chunk(3, dim=-1)
         else:
@@ -190,6 +213,7 @@ class MiniMaxH3AttnProcessor:
 
         if self.sequence_parallel:
             from utils.distributed import all_to_all
+
             query = all_to_all(query, scatter_dim=2, gather_dim=1)
             key = all_to_all(key, scatter_dim=2, gather_dim=1)
             value = all_to_all(value, scatter_dim=2, gather_dim=1)
@@ -199,6 +223,7 @@ class MiniMaxH3AttnProcessor:
         head_offset = 0
         if self.sequence_parallel:
             from utils.distributed import get_sp_rank
+
             head_offset = get_sp_rank() * query.shape[2]
         if isinstance(camera, CameraBundle):
             if self.camera_mode == "matrix":
@@ -208,16 +233,21 @@ class MiniMaxH3AttnProcessor:
             camera = camera.decomposed if matrix is None else None
 
         if rotary_emb is not None:
-            query = _apply_rotary_emb(query, *rotary_emb)
-            key = _apply_rotary_emb(key, *rotary_emb)
+            query = apply_rotary_emb(query, *rotary_emb)
+            key = apply_rotary_emb(key, *rotary_emb)
 
         if matrix is not None:
             start = 0 if wrapped else 12
             query = apply_matrix(query, matrix.projection.mT, camera_indices, head_offset, attn.heads, start)
             key = apply_matrix(key, matrix.inverse, camera_indices, head_offset, attn.heads, start)
             if not wrapped:
-                value = apply_matrix(_apply_rotary_emb(value, *rotary_emb), matrix.inverse, camera_indices, head_offset,
-                                     attn.heads)
+                value = apply_matrix(
+                    apply_rotary_emb(value, *rotary_emb),
+                    matrix.inverse,
+                    camera_indices,
+                    head_offset,
+                    attn.heads,
+                )
 
         if camera is not None:
             query = apply_camera(query, camera, camera_indices)
@@ -232,9 +262,7 @@ class MiniMaxH3AttnProcessor:
                 key.transpose(1, 2),
                 value.transpose(1, 2),
                 block_mask=attention_mask,
-                kernel_options={
-                    "BACKEND": "FLASH"
-                } if self.fa4 else None,
+                kernel_options={"BACKEND": "FLASH"} if self.fa4 else None,
             ).transpose(1, 2)
         else:
             hidden_states = dispatch_attention_fn(
@@ -248,8 +276,10 @@ class MiniMaxH3AttnProcessor:
                 parallel_config=self._parallel_config,
             )
         if matrix is not None and not wrapped:
-            hidden_states = apply_matrix(hidden_states, matrix.projection, camera_indices, head_offset, attn.heads)
-            hidden_states = _apply_rotary_emb(hidden_states, rotary_emb[0], -rotary_emb[1])
+            hidden_states = apply_matrix(
+                hidden_states, matrix.projection, camera_indices, head_offset, attn.heads
+            )
+            hidden_states = apply_rotary_emb(hidden_states, rotary_emb[0], -rotary_emb[1])
         if self.sequence_parallel:
             hidden_states = all_to_all(hidden_states, scatter_dim=1, gather_dim=2)
         hidden_states = hidden_states.flatten(2, 3).type_as(query)
@@ -303,8 +333,17 @@ class MiniMaxH3Attention(nn.Module):
         cache_layout=None,
         update_cache=False,
     ) -> torch.Tensor:
-        return self.processor(self, hidden_states, rotary_emb, attention_mask, camera, camera_indices, kv_cache,
-                              cache_layout, update_cache)
+        return self.processor(
+            self,
+            hidden_states,
+            rotary_emb,
+            attention_mask,
+            camera,
+            camera_indices,
+            kv_cache,
+            cache_layout,
+            update_cache,
+        )
 
 
 class MiniMaxH3TokenRefinerBlock(nn.Module):
@@ -332,7 +371,9 @@ class MiniMaxH3TokenRefinerBlock(nn.Module):
         self.norm2 = nn.RMSNorm(hidden_size, eps=norm_eps)
         self.ff = FeedForward(hidden_size, inner_dim=ffn_dim, activation_fn="swiglu", bias=False)
 
-    def forward(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(self.norm1(hidden_states), attention_mask=attention_mask)
         hidden_states = hidden_states + self.ff(self.norm2(hidden_states))
         return hidden_states
@@ -352,23 +393,28 @@ class MiniMaxH3TokenRefiner(nn.Module):
         final_norm_eps: float,
     ):
         super().__init__()
-        self.refiner_blocks = nn.ModuleList([
-            MiniMaxH3TokenRefinerBlock(
-                hidden_size=hidden_size,
-                num_attention_heads=num_attention_heads,
-                attention_head_dim=attention_head_dim,
-                ffn_dim=ffn_dim,
-                norm_eps=norm_eps,
-                qk_norm_eps=qk_norm_eps,
-            ) for _ in range(num_layers)
-        ])
+        self.refiner_blocks = nn.ModuleList(
+            [
+                MiniMaxH3TokenRefinerBlock(
+                    hidden_size=hidden_size,
+                    num_attention_heads=num_attention_heads,
+                    attention_head_dim=attention_head_dim,
+                    ffn_dim=ffn_dim,
+                    norm_eps=norm_eps,
+                    qk_norm_eps=qk_norm_eps,
+                )
+                for _ in range(num_layers)
+            ]
+        )
         self.final_norm = nn.RMSNorm(hidden_size, eps=final_norm_eps)
         self.gradient_checkpointing = False
 
-    def forward(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         for block in self.refiner_blocks:
             if torch.is_grad_enabled() and self.gradient_checkpointing:
-                hidden_states = self._gradient_checkpointing_func(block, hidden_states, attention_mask)
+                hidden_states = self.gradient_checkpointing_func(block, hidden_states, attention_mask)
             else:
                 hidden_states = block(hidden_states, attention_mask)
         return self.final_norm(hidden_states)
@@ -400,7 +446,9 @@ class MiniMaxH3TransformerBlock(nn.Module):
         )
         self.norm2 = nn.RMSNorm(hidden_size, eps=norm_eps)
         self.ff = FeedForward(hidden_size, inner_dim=ffn_dim, activation_fn="swiglu", bias=False)
-        self.adaln_proj = MiniMaxH3AdaLayerNormModulation(time_embed_dim=time_embed_dim, hidden_size=hidden_size)
+        self.adaln_proj = MiniMaxH3AdaLayerNormModulation(
+            time_embed_dim=time_embed_dim, hidden_size=hidden_size
+        )
 
     def forward(
         self,
@@ -420,15 +468,25 @@ class MiniMaxH3TransformerBlock(nn.Module):
         residual = hidden_states
         norm_hidden_states = self.norm1(hidden_states)
         norm_hidden_states = norm_hidden_states * (
-            1.0 + scale_msa.index_select(0, adaln_indices)) + shift_msa.index_select(0, adaln_indices)
-        attn_output = self.attn(norm_hidden_states, rotary_emb, attention_mask, camera, camera_indices, kv_cache,
-                                cache_layout, update_cache)
+            1.0 + scale_msa.index_select(0, adaln_indices)
+        ) + shift_msa.index_select(0, adaln_indices)
+        attn_output = self.attn(
+            norm_hidden_states,
+            rotary_emb,
+            attention_mask,
+            camera,
+            camera_indices,
+            kv_cache,
+            cache_layout,
+            update_cache,
+        )
         hidden_states = residual + gate_msa.index_select(0, adaln_indices) * attn_output
 
         residual = hidden_states
         norm_hidden_states = self.norm2(hidden_states)
         norm_hidden_states = norm_hidden_states * (
-            1.0 + scale_mlp.index_select(0, adaln_indices)) + shift_mlp.index_select(0, adaln_indices)
+            1.0 + scale_mlp.index_select(0, adaln_indices)
+        ) + shift_mlp.index_select(0, adaln_indices)
         ff_output = self.ff(norm_hidden_states)
         hidden_states = residual + gate_mlp.index_select(0, adaln_indices) * ff_output
 
@@ -494,22 +552,7 @@ class MiniMaxH3Transformer3DModel(nn.Module):
             Epsilon of the token refiner output norm and of `norm_out`.
     """
 
-    _supports_gradient_checkpointing = True
-    _no_split_modules = ["MiniMaxH3TransformerBlock", "MiniMaxH3TokenRefinerBlock", "MiniMaxH3AdaLayerNormOut"]
-    _repeated_blocks = ["MiniMaxH3TransformerBlock", "MiniMaxH3TokenRefinerBlock"]
-    _skip_layerwise_casting_patterns = ["norm"]
-    # MiniMax-H3 ships a mixed-precision checkpoint: the two input patch projections, the timestep MLP and the two
-    # output heads are float32 while everything else (including the AdaLN projections) is bfloat16. The `rope.inv_freq`
-    # buffer is computed rather than loaded and is kept float32 for the same reason the reference ships it float32.
-    # Entries are matched as substrings of the parameter name, so `proj_in` / `proj_out` also cover the audio heads.
-    _keep_in_fp32_modules = [
-        "proj_in",
-        "audio_proj_in",
-        "time_embedder",
-        "proj_out",
-        "audio_proj_out",
-        "rope",
-    ]
+    # Source mixed dtypes are preserved by checkpoint loading and FSDP wrapping.
 
     def __init__(
         self,
@@ -544,9 +587,9 @@ class MiniMaxH3Transformer3DModel(nn.Module):
 
         # 2. Timestep embedding, shared by every AdaLN projection
         self.time_proj = Timesteps(num_channels=freq_dim, flip_sin_to_cos=True, downscale_freq_shift=0)
-        self.time_embedder = TimestepEmbedding(in_channels=freq_dim,
-                                               time_embed_dim=time_embed_hidden_dim,
-                                               out_dim=time_embed_dim)
+        self.time_embedder = TimestepEmbedding(
+            in_channels=freq_dim, time_embed_dim=time_embed_hidden_dim, out_dim=time_embed_dim
+        )
 
         # 3. Rotary embedding over the packed (t, h, w) grid
         self.rope = MiniMaxH3RotaryPosEmbed(rope_freq_dim=rope_freq_dim, rope_theta=rope_theta)
@@ -564,27 +607,62 @@ class MiniMaxH3Transformer3DModel(nn.Module):
         )
 
         # 5. The block stack
-        self.transformer_blocks = nn.ModuleList([
-            MiniMaxH3TransformerBlock(
-                hidden_size=hidden_size,
-                num_attention_heads=num_attention_heads,
-                attention_head_dim=attention_head_dim,
-                ffn_dim=ffn_dim,
-                time_embed_dim=time_embed_dim,
-                norm_eps=norm_eps,
-                qk_norm_eps=qk_norm_eps,
-            ) for _ in range(num_layers)
-        ])
+        self.transformer_blocks = nn.ModuleList(
+            [
+                MiniMaxH3TransformerBlock(
+                    hidden_size=hidden_size,
+                    num_attention_heads=num_attention_heads,
+                    attention_head_dim=attention_head_dim,
+                    ffn_dim=ffn_dim,
+                    time_embed_dim=time_embed_dim,
+                    norm_eps=norm_eps,
+                    qk_norm_eps=qk_norm_eps,
+                )
+                for _ in range(num_layers)
+            ]
+        )
 
         # 6. Shared output norm and the two per-modality output heads. Both heads run over every row of the packed
         # sequence; the rows of each modality are selected afterwards.
-        self.norm_out = MiniMaxH3AdaLayerNormOut(hidden_size=hidden_size,
-                                                 time_embed_dim=time_embed_dim,
-                                                 eps=final_norm_eps)
+        self.norm_out = MiniMaxH3AdaLayerNormOut(
+            hidden_size=hidden_size, time_embed_dim=time_embed_dim, eps=final_norm_eps
+        )
         self.proj_out = nn.Linear(hidden_size, video_patch_dim, bias=True)
         self.audio_proj_out = nn.Linear(hidden_size, audio_in_channels, bias=True)
 
         self.gradient_checkpointing = False
+
+    @classmethod
+    def from_pretrained(cls, checkpoint, device_for_name=None, progress=print):
+        """Load the complete original checkpoint, preserving mixed parameter dtypes.
+
+        device_for_name places intact layers for single-process diagnostics.
+        Distributed training applies FSDP after loading.
+        """
+        from h3.checkpoint import original_config, original_tensors
+
+        config = original_config(checkpoint)
+        with torch.device("meta"):
+            model = cls(**config)
+        expected = dict(model.named_parameters())
+        loaded = set()
+        for name, tensor in original_tensors(checkpoint, config, progress):
+            if name not in expected or name in loaded or tensor.shape != expected[name].shape:
+                raise ValueError(f"Checkpoint cannot be assigned to this model: {name}")
+            device = device_for_name(name) if device_for_name else "cpu"
+            owner, leaf = name.rsplit(".", 1)
+            model.get_submodule(owner).register_parameter(
+                leaf, torch.nn.Parameter(tensor.to(device), requires_grad=False)
+            )
+            loaded.add(name)
+        if loaded != set(expected):
+            raise ValueError(f"Uninitialized model parameters: {set(expected)-loaded}")
+        model.rope = MiniMaxH3RotaryPosEmbed(config["rope_freq_dim"], config["rope_theta"])
+        device = device_for_name("rope.inv_freq") if device_for_name else "cpu"
+        model.rope.to(device)
+        if any(p.is_meta for p in model.parameters()) or any(b.is_meta for b in model.buffers()):
+            raise ValueError("Checkpoint loading left meta tensors")
+        return model
 
     def configure_attention(self, cfg):
         """Set camera encoding and trainable attention before FSDP wrapping."""
@@ -603,7 +681,9 @@ class MiniMaxH3Transformer3DModel(nn.Module):
         self.camera_wrapped = not bool(cfg.model.prope_unwrapped)
         block_size = cfg.h3.get("training_attention_block_size", (128, 128))
         self.training_attention_block_size = tuple(block_size) if cfg.model.fa4 else (128, 128)
-        self.grouped_attention_backward = bool(cfg.model.fa4 and cfg.h3.get("grouped_attention_backward", False))
+        self.grouped_attention_backward = bool(
+            cfg.model.fa4 and cfg.h3.get("grouped_attention_backward", False)
+        )
         self.dynamic_grouped_metadata = bool(cfg.h3.get("dynamic_grouped_metadata", False))
         self.grouped_attention_deterministic = bool(cfg.h3.get("grouped_attention_deterministic", False))
         self.training_shape_buckets = dict(cfg.h3.get("training_shape_buckets", {}))
@@ -695,12 +775,15 @@ class MiniMaxH3Transformer3DModel(nn.Module):
         if attention_kwargs:
             raise ValueError("H3 uses original parameters only; attention_kwargs must be empty")
         if position_ids.ndim != 2 or position_ids.shape[-1] != 3:
-            raise ValueError(f"`position_ids` must be a `(seq_len, 3)` tensor, got {list(position_ids.shape)}.")
+            raise ValueError(
+                f"`position_ids` must be a `(seq_len, 3)` tensor, got {list(position_ids.shape)}."
+            )
         sequence_length = position_ids.shape[0]
-        if token_tags.shape != (sequence_length, ) or timestep_indices.shape != (sequence_length, ):
+        if token_tags.shape != (sequence_length,) or timestep_indices.shape != (sequence_length,):
             raise ValueError(
                 "`token_tags` and `timestep_indices` must both be `(seq_len,)` tensors matching `position_ids`, got "
-                f"{list(token_tags.shape)} and {list(timestep_indices.shape)} for seq_len={sequence_length}.")
+                f"{list(token_tags.shape)} and {list(timestep_indices.shape)} for seq_len={sequence_length}."
+            )
 
         if scale_log is not None:
             # Encode scale in existing spatial phases, anchored against text.
@@ -717,7 +800,7 @@ class MiniMaxH3Transformer3DModel(nn.Module):
                 raise ValueError("Camera encoding requires head_dim=128 and rope_freq_dim=16")
             if camera_pose.shape[0] != hidden_states.shape[0] or camera_pose.device != hidden_states.device:
                 raise ValueError("Camera poses must match the video batch and device")
-            if camera_indices.shape != (sequence_length, ) or camera_indices.dtype != torch.long:
+            if camera_indices.shape != (sequence_length,) or camera_indices.dtype != torch.long:
                 raise ValueError("camera_indices must be an int64 tensor of shape [seq_len]")
             if camera_indices.device != hidden_states.device:
                 raise ValueError("camera_indices must be on the video device")
@@ -733,11 +816,16 @@ class MiniMaxH3Transformer3DModel(nn.Module):
             if wrapped and (camera_reference is None or camera_projection_reference is None):
                 raise ValueError("Wrapped H3 camera encoding requires a fixed conditioning-camera reference")
             decomposed_pose = camera_pose
-            neutral = (wrapped and camera_projections is not None
-                       and torch.equal(camera_pose, camera_reference.expand_as(camera_pose))
-                       and torch.equal(decomposed_pose, camera_reference.expand_as(decomposed_pose))
-                       and all(torch.equal(value, reference.expand_as(value))
-                               for value, reference in zip(camera_projections, camera_projection_reference)))
+            neutral = (
+                wrapped
+                and camera_projections is not None
+                and torch.equal(camera_pose, camera_reference.expand_as(camera_pose))
+                and torch.equal(decomposed_pose, camera_reference.expand_as(decomposed_pose))
+                and all(
+                    torch.equal(value, reference.expand_as(value))
+                    for value, reference in zip(camera_projections, camera_projection_reference)
+                )
+            )
             if neutral:
                 # An exactly neutral wrapped transform is the identity. Reuse
                 # the native compiled graph so its BF16 fusion/rounding is also
@@ -746,10 +834,15 @@ class MiniMaxH3Transformer3DModel(nn.Module):
             else:
                 camera = precompute_camera(decomposed_pose, camera_reference if wrapped else None)
             if getattr(self, "worldviews_camera", False) and not neutral:
-                matrix = (MatrixCameraEncoding(
-                    *camera_projections) if camera_projections is not None else camera_projection(camera_pose))
+                matrix = (
+                    MatrixCameraEncoding(*camera_projections)
+                    if camera_projections is not None
+                    else camera_projection(camera_pose)
+                )
                 if wrapped:
-                    matrix = relative_projection(matrix.projection, matrix.inverse, *camera_projection_reference)
+                    matrix = relative_projection(
+                        matrix.projection, matrix.inverse, *camera_projection_reference
+                    )
                 camera = CameraBundle(camera, matrix, wrapped)
 
         layout = attention_mask if isinstance(attention_mask, TokenLayout) else None
@@ -758,22 +851,30 @@ class MiniMaxH3Transformer3DModel(nn.Module):
                 raise ValueError("Packed token layout differs from the model sequence")
             if text_attention_mask is None:
                 text_layout = layout.to(hidden_states.device)
-                text_attention_mask = (text_layout.dense(text_indices)
-                                       if text_indices.numel() <= 4096 else text_layout.block_mask(text_indices))
+                text_attention_mask = (
+                    text_layout.dense(text_indices)
+                    if text_indices.numel() <= 4096
+                    else text_layout.block_mask(text_indices)
+                )
         elif attention_mask is not None and text_attention_mask is None:
             if not isinstance(attention_mask, torch.Tensor):
                 raise ValueError("A sparse packed mask requires an explicit text_attention_mask")
-            if attention_mask.ndim not in (2, 4) or attention_mask.shape[-2:] != (sequence_length, sequence_length):
+            if attention_mask.ndim not in (2, 4) or attention_mask.shape[-2:] != (
+                sequence_length,
+                sequence_length,
+            ):
                 raise ValueError("A dense packed attention mask must end in [seq_len, seq_len]")
             text_attention_mask = attention_mask.index_select(-2, text_indices).index_select(-1, text_indices)
 
         # 1. Project each modality and scatter the rows into the packed sequence buffer. The checkpoint is
         # mixed-precision (the two patch projections are float32 while `context_embedder` and the block stack are
-        # bfloat16 — see `_keep_in_fp32_modules`), so every input is aligned with its projection's parameter dtype,
+        # bfloat16 — see the released checkpoint dtype policy), so every input is aligned with its projection's parameter dtype,
         # mirroring the reference's explicit casts. The text stream sets the dtype of the packed sequence.
         video_embeds = self.proj_in(hidden_states.to(get_parameter_dtype(self.proj_in)))
         audio_embeds = self.audio_proj_in(audio_hidden_states.to(get_parameter_dtype(self.audio_proj_in)))
-        text_embeds = self.context_embedder(encoder_hidden_states.to(get_parameter_dtype(self.context_embedder)))
+        text_embeds = self.context_embedder(
+            encoder_hidden_states.to(get_parameter_dtype(self.context_embedder))
+        )
         text_embeds = self.token_refiner(text_embeds, text_attention_mask)
 
         hidden_states = text_embeds.new_zeros((text_embeds.shape[0], sequence_length, text_embeds.shape[-1]))
@@ -792,7 +893,8 @@ class MiniMaxH3Transformer3DModel(nn.Module):
 
         sequence_parallel = getattr(self, "sequence_parallel", False)
         if sequence_parallel:
-            from utils.distributed import scatter_forward, gather_forward
+            from utils.distributed import gather_forward, scatter_forward
+
             hidden_states = scatter_forward(hidden_states, dim=1)
             adaln_indices = scatter_forward(adaln_indices, dim=0)
 
@@ -801,20 +903,35 @@ class MiniMaxH3Transformer3DModel(nn.Module):
         local_inputs = {}
         # Keep inference's native block representation; this only selects the
         # original FA4 backward tile used by gradient-enabled training.
-        block_size = getattr(self, "training_attention_block_size", (128, 128)) if torch.is_grad_enabled() else (128, 128)
+        block_size = (
+            getattr(self, "training_attention_block_size", (128, 128))
+            if torch.is_grad_enabled()
+            else (128, 128)
+        )
         grouped_plan = None
-        if layout is not None and torch.is_grad_enabled() and getattr(self, "grouped_attention_backward", False):
+        if (
+            layout is not None
+            and torch.is_grad_enabled()
+            and getattr(self, "grouped_attention_backward", False)
+        ):
             from h3.modules.grouped_attention import visibility_groups
+
             grouped_plan = visibility_groups(layout)
         for block_index, block in enumerate(self.transformer_blocks):
             # CPU-offloaded FSDP parameters are resident on CPU between calls.
             block_device = hidden_states.device if sequence_parallel else next(block.parameters()).device
             if block_device not in local_inputs:
-                mask = layout.to(block_device).block_mask(block_size=block_size) if layout is not None else attention_mask
+                mask = (
+                    layout.to(block_device).block_mask(block_size=block_size)
+                    if layout is not None
+                    else attention_mask
+                )
                 if grouped_plan is not None:
                     mask.h3_visibility_groups = grouped_plan.to(
-                        block_device, getattr(self, "dynamic_grouped_metadata", False),
-                        getattr(self, "grouped_attention_deterministic", False))
+                        block_device,
+                        getattr(self, "dynamic_grouped_metadata", False),
+                        getattr(self, "grouped_attention_deterministic", False),
+                    )
                 if mask is not None and layout is None:
                     mask = mask.to(block_device)
                 local_inputs[block_device] = (
@@ -826,11 +943,17 @@ class MiniMaxH3Transformer3DModel(nn.Module):
                     camera_indices.to(block_device) if camera_indices is not None else None,
                 )
             hidden_states = hidden_states.to(block_device)
-            cache_args = (() if kv_caches is None else (kv_caches[block_index], layout.to(block_device), update_cache))
-            if torch.is_grad_enabled() and self.gradient_checkpointing and not getattr(
-                    self, "blocks_checkpointed", False):
-                hidden_states = self._gradient_checkpointing_func(block, hidden_states, *local_inputs[block_device],
-                                                                  *cache_args)
+            cache_args = (
+                () if kv_caches is None else (kv_caches[block_index], layout.to(block_device), update_cache)
+            )
+            if (
+                torch.is_grad_enabled()
+                and self.gradient_checkpointing
+                and not getattr(self, "blocks_checkpointed", False)
+            ):
+                hidden_states = self.gradient_checkpointing_func(
+                    block, hidden_states, *local_inputs[block_device], *cache_args
+                )
             else:
                 hidden_states = block(hidden_states, *local_inputs[block_device], *cache_args)
 
@@ -838,11 +961,12 @@ class MiniMaxH3Transformer3DModel(nn.Module):
             hidden_states = gather_forward(hidden_states, dim=1)
 
         # 5. Both heads run over every row, then the rows of each modality are selected. The heads are listed in
-        # `_keep_in_fp32_modules`, so they stay float32 while the block stack runs in the requested `torch_dtype`;
+        # the released checkpoint dtype policy, so they stay float32 while the block stack runs in the requested `torch_dtype`;
         # align the activation with their parameter dtype.
         output_device = hidden_states.device if sequence_parallel else next(self.norm_out.parameters()).device
-        hidden_states = self.norm_out(hidden_states.to(output_device), temb.to(output_device),
-                                      timestep_indices.to(output_device)).to(get_parameter_dtype(self.proj_out))
+        hidden_states = self.norm_out(
+            hidden_states.to(output_device), temb.to(output_device), timestep_indices.to(output_device)
+        ).to(get_parameter_dtype(self.proj_out))
         video_output = self.proj_out(hidden_states).index_select(1, video_indices.to(output_device))
         audio_output = self.audio_proj_out(hidden_states).index_select(1, audio_indices.to(output_device))
 

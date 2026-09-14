@@ -1,15 +1,10 @@
 # Simple dataset aggregator for co-training
 # Per-sample weighted random choice of sub-dataset
-import math
 import random
+
 from torch.utils.data import Dataset
 
-from utils.console import log
-from utils.console import green
-from utils.console import blue
-from utils.console import yellow
-from utils.console import red
-from utils.distributed import is_main_process
+from utils.console import blue, green, log, red, yellow
 from utils.distributed import is_node_main
 
 
@@ -50,29 +45,39 @@ class DatasetAggregator(Dataset):
             # Datasets with effective_samples == 0 (empty after length prefilter)
             # get weight=0 and are never picked by random.choices below.
             weights = [
-                (e ** getattr(ds, 'sampling_weight_power', 0.8)) if e > 0 else 0.0
+                (e ** getattr(ds, "sampling_weight_power", 0.8)) if e > 0 else 0.0
                 for ds, e in zip(datasets, eff)
             ]
             if is_node_main():
                 total_w = sum(weights)
                 if total_w == 0:
-                    log(red('[Aggregator] FATAL: all sub-datasets are empty '
-                            '(effective_samples=0). Check the per-dataset '
-                            'filter warnings above.'))
+                    log(
+                        red(
+                            "[Aggregator] FATAL: all sub-datasets are empty "
+                            "(effective_samples=0). Check the per-dataset "
+                            "filter warnings above."
+                        )
+                    )
                 for ds, e, w in zip(datasets, eff, weights):
                     pct = (w / total_w * 100) if total_w > 0 else 0.0
-                    swp = getattr(ds, 'sampling_weight_power', 0.8)
-                    tag = f' [p={swp}]' if swp != 0.8 else ''
-                    name = getattr(ds, 'data_path', type(ds).__name__)
+                    swp = getattr(ds, "sampling_weight_power", 0.8)
+                    tag = f" [p={swp}]" if swp != 0.8 else ""
+                    name = getattr(ds, "data_path", type(ds).__name__)
                     # Show just the filename for readability
-                    if isinstance(name, str) and '/' in name:
-                        name = name.rsplit('/', 1)[-1]
+                    if isinstance(name, str) and "/" in name:
+                        name = name.rsplit("/", 1)[-1]
                     if w == 0:
-                        log(red(f'  Aggregator: {name}{tag} — DROPPED '
-                                f'(0 viable rows after length prefilter)'))
+                        log(
+                            red(
+                                f"  Aggregator: {name}{tag} — DROPPED "
+                                f"(0 viable rows after length prefilter)"
+                            )
+                        )
                     else:
-                        log(f'  Aggregator: {blue(name)}{tag} — {ds.n_seqs} scenes, '
-                            f'{green(e)} effective samples, weight={yellow(f"{pct:.1f}%")}')
+                        log(
+                            f"  Aggregator: {blue(name)}{tag} — {ds.n_seqs} scenes, "
+                            f'{green(e)} effective samples, weight={yellow(f"{pct:.1f}%")}'
+                        )
         total = sum(weights)
         if total == 0:
             # Avoid divide-by-zero — caller will surface the fatal log above.
@@ -146,7 +151,7 @@ def view_as_batch_collate(samples):
     import torch
     from torch.utils.data._utils.collate import default_collate
 
-    if not any(s.get('cpu', {}).get('view_as_batch') for s in samples):
+    if not any(s.get("cpu", {}).get("view_as_batch") for s in samples):
         return default_collate(samples)
 
     # Fold factor comes from `orig_mv` (the real per-view count), NOT batch['mv']:
@@ -154,12 +159,11 @@ def view_as_batch_collate(samples):
     # element) and stashes the true view count in orig_mv. Read from samples[0]
     # and applied to every sample — assumes one collate's samples share an mv,
     # which holds for the canonical batch_size=1 per GPU.
-    mv = int(samples[0]['cpu'].get('orig_mv', 1))
+    mv = int(samples[0]["cpu"].get("orig_mv", 1))
 
     # Tensor half: collate everything except cpu, then fold mv into the batch.
-    batched = default_collate([{k: v for k, v in s.items() if k != 'cpu'}
-                               for s in samples])
-    for k in ('frames', 'projs', 'projs_inv', 'Ks', 'Rs', 'Ts', 'prompt_embeds'):
+    batched = default_collate([{k: v for k, v in s.items() if k != "cpu"} for s in samples])
+    for k in ("frames", "projs", "projs_inv", "Ks", "Rs", "Ts", "prompt_embeds"):
         t = batched.get(k)
         if isinstance(t, torch.Tensor) and t.ndim >= 2:
             batched[k] = t.flatten(0, 1)
@@ -167,12 +171,11 @@ def view_as_batch_collate(samples):
     # cpu half: fold per-view (length-mv) fields into the batch; collate the rest
     # (scalars, dicts, the shared pack) normally.
     def is_per_view(v):
-        return (not isinstance(v, (str, bytes, dict, torch.Tensor))
-                and hasattr(v, '__len__') and len(v) == mv)
+        return not isinstance(v, (str, bytes, dict, torch.Tensor)) and hasattr(v, "__len__") and len(v) == mv
+
     cpu_out = {}
-    for key in samples[0]['cpu']:
-        vals = [s['cpu'][key] for s in samples]
-        cpu_out[key] = ([x for v in vals for x in v] if is_per_view(vals[0])
-                        else default_collate(vals))
-    batched['cpu'] = cpu_out
+    for key in samples[0]["cpu"]:
+        vals = [s["cpu"][key] for s in samples]
+        cpu_out[key] = [x for v in vals for x in v] if is_per_view(vals[0]) else default_collate(vals)
+    batched["cpu"] = cpu_out
     return batched

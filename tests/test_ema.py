@@ -1,8 +1,8 @@
 from copy import deepcopy
 
-from omegaconf import OmegaConf
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.ema import ShardedEMA, inference_weight_kind
@@ -33,7 +33,7 @@ def test_ema_matches_weighted_optimizer_trajectory_and_preserves_frozen_weights(
     for _ in range(7):
         update(model, optimizer, ema)
         trajectory.append(model.weight.detach().double().clone())
-    expected = trajectory[0] * 0.9 ** 7
+    expected = trajectory[0] * 0.9**7
     expected += sum(value * (0.1 * 0.9 ** (7 - i)) for i, value in enumerate(trajectory[1:], 1))
     torch.testing.assert_close(ema.weights["weight"].double(), expected, atol=2e-7, rtol=1e-6)
     assert "bias" not in ema.weights and ema.weights["empty_shard"].numel() == 0
@@ -149,8 +149,8 @@ def test_unsaturated_decay_change_matches_using_new_cap_from_start(tmp_path):
     checkpoint = save_checkpoint(model, optimizer, cfg, 16, 1, {}, tmp_path, ema=ema)
     restored = ShardedEMA.from_config(model, target_cfg)
     state = load_checkpoint(model, optimizer, target_cfg, checkpoint, ema=restored)
-    assert state["ema_decay_change"] == dict(previous=.999, current=.995, step=16, history_identical=True)
-    assert restored.decay == .995 and restored.num_updates == 16
+    assert state["ema_decay_change"] == dict(previous=0.999, current=0.995, step=16, history_identical=True)
+    assert restored.decay == 0.995 and restored.num_updates == 16
     for _ in range(4):
         state = torch.get_rng_state()
         update(model, optimizer, restored)
@@ -169,12 +169,12 @@ def test_decay_change_cannot_relabel_a_different_history_or_recipe(tmp_path):
         update(model, optimizer, ema)
     checkpoint = save_checkpoint(model, optimizer, cfg, 5, 1, {}, tmp_path, ema=ema)
     changed = deepcopy(cfg)
-    changed.ema_weight = .2
+    changed.ema_weight = 0.2
     raw = model.weight.detach().clone()
     with pytest.raises(ValueError, match="settings differ"):
         load_checkpoint(model, optimizer, changed, checkpoint, ema=ShardedEMA.from_config(model, changed))
-    changed.ema_weight = .8
-    changed.h3.condition_noise = .02
+    changed.ema_weight = 0.8
+    changed.h3.condition_noise = 0.02
     with pytest.raises(ValueError, match="settings differ"):
         load_checkpoint(model, optimizer, changed, checkpoint, ema=ShardedEMA.from_config(model, changed))
     assert torch.equal(model.weight, raw)
@@ -182,7 +182,7 @@ def test_decay_change_cannot_relabel_a_different_history_or_recipe(tmp_path):
 
 def test_explicit_fixed_decay_transition_retains_weights_moments_and_count(tmp_path):
     model, optimizer, cfg = setup()
-    cfg.ema_weight, cfg.ema_warmup = .995, True
+    cfg.ema_weight, cfg.ema_warmup = 0.995, True
     ema = ShardedEMA.from_config(model, cfg)
     for _ in range(5):
         update(model, optimizer, ema)
@@ -195,21 +195,27 @@ def test_explicit_fixed_decay_transition_retains_weights_moments_and_count(tmp_p
     restored = ShardedEMA.from_config(model, fixed)
     with pytest.raises(ValueError, match="settings differ"):
         load_checkpoint(model, optimizer, fixed, checkpoint, ema=restored)
-    state = load_checkpoint(model, optimizer, fixed, checkpoint, ema=restored,
-                            ema_schedule_change="User selected fixed 0.995 without warmup")
-    assert restored.num_updates == 5 and restored.current_decay == .995 and not restored.warmup
+    state = load_checkpoint(
+        model,
+        optimizer,
+        fixed,
+        checkpoint,
+        ema=restored,
+        ema_schedule_change="User selected fixed 0.995 without warmup",
+    )
+    assert restored.num_updates == 5 and restored.current_decay == 0.995 and not restored.warmup
     assert torch.equal(model.weight, raw)
     torch.testing.assert_close(optimizer.state_dict(), moments, rtol=0, atol=0)
     torch.testing.assert_close(restored.weights, averaged["weights"], rtol=0, atol=0)
-    assert state["ema_schedule_change"]["previous"] == dict(decay=.995, warmup=True)
-    assert state["ema_schedule_change"]["current"] == dict(decay=.995, warmup=False)
+    assert state["ema_schedule_change"]["previous"] == dict(decay=0.995, warmup=True)
+    assert state["ema_schedule_change"]["current"] == dict(decay=0.995, warmup=False)
     assert state["ema_schedule_change"]["saved_history_preserved"]
     assert not state["ema_schedule_change"]["history_identical_to_new_schedule"]
     expected = restored.weights["weight"].double().clone()
     for _ in range(3):
         update(model, optimizer, restored)
-        expected = .995 * expected + .005 * model.weight.detach().double()
-        assert restored.current_decay == .995
+        expected = 0.995 * expected + 0.005 * model.weight.detach().double()
+        assert restored.current_decay == 0.995
         torch.testing.assert_close(restored.weights["weight"].double(), expected, atol=2e-7, rtol=1e-6)
     updated = save_checkpoint(model, optimizer, fixed, 8, 1, {}, tmp_path, ema=restored)
     reloaded = ShardedEMA.from_config(model, fixed)
@@ -229,7 +235,7 @@ def test_explicit_schedule_transition_still_rejects_other_recipe_changes(tmp_pat
     raw, averaged = model.weight.detach().clone(), deepcopy(restored.state_dict())
     with pytest.raises(ValueError, match="explicit reason"):
         load_checkpoint(model, optimizer, fixed, checkpoint, ema=restored, ema_schedule_change=" ")
-    fixed.h3.condition_noise = .02
+    fixed.h3.condition_noise = 0.02
     with pytest.raises(ValueError, match="settings differ"):
         load_checkpoint(model, optimizer, fixed, checkpoint, ema=restored, ema_schedule_change="Fixed decay")
     assert torch.equal(model.weight, raw)

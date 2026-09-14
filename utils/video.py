@@ -7,28 +7,17 @@ Notes:
 """
 
 from __future__ import annotations
-from functools import lru_cache
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import os
-import av
-import math
-import imageio
-import subprocess
-import numpy as np
-from os.path import dirname, abspath
-
-from PIL import Image
-from utils.console import log
-from utils.console import yellow
-from utils.console import red
-from utils.console import print
-from utils.console import tqdm
-from utils.timer import timer
-
-os.environ['SVT_LOG'] = '1'  # avoid verbose av1 logging
-
 import struct
+import subprocess
+from os.path import abspath, dirname
+from typing import Iterable, List, Tuple, Union
+
+import av
+import numpy as np
+
+os.environ["SVT_LOG"] = "1"  # avoid verbose av1 logging
 
 
 def read_metadata_from_moov(video_path):
@@ -44,7 +33,7 @@ def read_metadata_from_moov(video_path):
     Raises ValueError for non-mp4 or missing boxes.
     """
 
-    def _read_header(f):
+    def read_header(f):
         # Parse one ISO-BMFF box header: 4-byte big-endian size, 4-byte type.
         # `size` counts the whole box INCLUDING the header, so `start + size`
         # is the next box. `hdr` is the header length so callers can skip to
@@ -56,11 +45,11 @@ def read_metadata_from_moov(video_path):
         data = f.read(8)
         if len(data) < 8:
             return None, 0, 0
-        size, = struct.unpack('>I', data[:4])
+        (size,) = struct.unpack(">I", data[:4])
         btype = data[4:8]
         hdr = 8
         if size == 1:
-            size, = struct.unpack('>Q', f.read(8))
+            (size,) = struct.unpack(">Q", f.read(8))
             hdr = 16
         elif size == 0:
             cur = f.tell()
@@ -69,7 +58,7 @@ def read_metadata_from_moov(video_path):
             f.seek(cur)
         return btype, size, hdr
 
-    def _find(f, target, end):
+    def find(f, target, end):
         # Linear scan of sibling boxes from the current offset up to `end`,
         # returning (payload_start, box_end) of the first box whose type ==
         # `target`, else (None, None). Boxes are walked by `start + size`, so
@@ -77,7 +66,7 @@ def read_metadata_from_moov(video_path):
         # returned (payload_start, box_end) as the new search window.
         while f.tell() < end:
             start = f.tell()
-            btype, size, hdr = _read_header(f)
+            btype, size, hdr = read_header(f)
             if btype is None:
                 break
             if btype == target:
@@ -85,43 +74,43 @@ def read_metadata_from_moov(video_path):
             f.seek(start + size)
         return None, None
 
-    with open(video_path, 'rb') as f:
+    with open(video_path, "rb") as f:
         fsize = f.seek(0, 2)
         f.seek(0)
 
-        moov_s, moov_e = _find(f, b'moov', fsize)
+        moov_s, moov_e = find(f, b"moov", fsize)
         if moov_s is None:
-            raise ValueError(f'No moov box in {video_path}')
+            raise ValueError(f"No moov box in {video_path}")
 
         # Find video trak (hdlr handler_type == 'vide')
         f.seek(moov_s)
         trak_s = trak_e = None
         while f.tell() < moov_e:
-            ts, te = _find(f, b'trak', moov_e)
+            ts, te = find(f, b"trak", moov_e)
             if ts is None:
                 break
             f.seek(ts)
-            mdia_s, mdia_e = _find(f, b'mdia', te)
+            mdia_s, mdia_e = find(f, b"mdia", te)
             if mdia_s:
                 f.seek(mdia_s)
-                hdlr_s, _ = _find(f, b'hdlr', mdia_e)
+                hdlr_s, _ = find(f, b"hdlr", mdia_e)
                 if hdlr_s:
                     f.seek(hdlr_s + 4)
-                    if f.read(8)[4:8] == b'vide':
+                    if f.read(8)[4:8] == b"vide":
                         trak_s, trak_e = ts, te
                         break
             f.seek(te if te else moov_e)
 
         if trak_s is None:
-            raise ValueError(f'No video trak in {video_path}')
+            raise ValueError(f"No video trak in {video_path}")
 
         # trak → tkhd (width/height as 16.16 fixed-point)
         f.seek(trak_s)
-        tkhd_s, _ = _find(f, b'tkhd', trak_e)
+        tkhd_s, _ = find(f, b"tkhd", trak_e)
         f.seek(tkhd_s)
         # tkhd is a FullBox: 1-byte version + 3-byte flags lead every such box.
         # The version selects 32- vs 64-bit time fields below.
-        ver = struct.unpack('B', f.read(1))[0]
+        ver = struct.unpack("B", f.read(1))[0]
         f.read(3)
         # skip creation/modification/track_ID/reserved/duration
         # v0: 4+4+4+4+4 = 20 bytes; v1: 8+8+4+4+8 = 32 bytes.
@@ -129,7 +118,7 @@ def read_metadata_from_moov(video_path):
         f.read(8 + 2 + 2 + 2 + 2 + 36)  # reserved + layer + group + volume + reserved + matrix
         # Track display width/height are 16.16 fixed-point; the integer pixel
         # size is the high 16 bits (the fractional part is unused here).
-        w_fixed, h_fixed = struct.unpack('>II', f.read(8))
+        w_fixed, h_fixed = struct.unpack(">II", f.read(8))
         width = w_fixed >> 16
         height = h_fixed >> 16
 
@@ -137,36 +126,36 @@ def read_metadata_from_moov(video_path):
         # timescale = media ticks per second; every PTS/stts delta in this trak
         # is expressed in these ticks, so time_base = 1 / timescale (seconds).
         f.seek(trak_s)
-        mdia_s, mdia_e = _find(f, b'mdia', trak_e)
+        mdia_s, mdia_e = find(f, b"mdia", trak_e)
         f.seek(mdia_s)
-        mdhd_s, _ = _find(f, b'mdhd', mdia_e)
+        mdhd_s, _ = find(f, b"mdhd", mdia_e)
         f.seek(mdhd_s)
-        ver = struct.unpack('B', f.read(1))[0]
+        ver = struct.unpack("B", f.read(1))[0]
         f.read(3)
         if ver == 0:
             f.read(8)  # creation + modification
-            timescale, mdhd_duration = struct.unpack('>II', f.read(8))
+            timescale, mdhd_duration = struct.unpack(">II", f.read(8))
         else:
             f.read(16)
-            timescale, = struct.unpack('>I', f.read(4))
-            mdhd_duration, = struct.unpack('>Q', f.read(8))
+            (timescale,) = struct.unpack(">I", f.read(4))
+            (mdhd_duration,) = struct.unpack(">Q", f.read(8))
 
         # mdia → minf → stbl
         f.seek(mdia_s)
-        minf_s, minf_e = _find(f, b'minf', mdia_e)
+        minf_s, minf_e = find(f, b"minf", mdia_e)
         f.seek(minf_s)
-        stbl_s, stbl_e = _find(f, b'stbl', minf_e)
+        stbl_s, stbl_e = find(f, b"stbl", minf_e)
 
         # stts → sample durations (gives frame count + fps)
         f.seek(stbl_s)
-        stts_s, _ = _find(f, b'stts', stbl_e)
+        stts_s, _ = find(f, b"stts", stbl_e)
         f.seek(stts_s + 4)  # +4: skip the FullBox 1-byte version + 3-byte flags
-        n_stts, = struct.unpack('>I', f.read(4))
+        (n_stts,) = struct.unpack(">I", f.read(4))
         # stts is run-length encoded: n_stts entries of (sample_count,
         # sample_delta), each a big-endian u32 (8 bytes/entry). counts[i] frames
         # share duration deltas[i] ticks. For strict CFR there is usually a
         # single entry, e.g. (n_frames, 512).
-        raw = np.frombuffer(f.read(n_stts * 8), dtype='>u4').reshape(-1, 2)
+        raw = np.frombuffer(f.read(n_stts * 8), dtype=">u4").reshape(-1, 2)
         counts = raw[:, 0].astype(np.int64)
         deltas = raw[:, 1].astype(np.int64)
         # Strip TRAILING zero-duration stts samples before counting frames. A
@@ -203,14 +192,14 @@ def read_metadata_from_moov(video_path):
 
         # stss → keyframe sample numbers (1-indexed). Absent → all keyframes.
         f.seek(stbl_s)
-        stss_s, _ = _find(f, b'stss', stbl_e)
+        stss_s, _ = find(f, b"stss", stbl_e)
         if stss_s is None:
             kf_pts = None
         else:
             f.seek(stss_s + 4)  # +4: skip FullBox version + flags
-            n_kf, = struct.unpack('>I', f.read(4))
+            (n_kf,) = struct.unpack(">I", f.read(4))
             # stss lists keyframe SAMPLE NUMBERS (1-indexed); -1 -> 0-indexed.
-            kf_samples = np.frombuffer(f.read(n_kf * 4), dtype='>u4').astype(np.int64) - 1
+            kf_samples = np.frombuffer(f.read(n_kf * 4), dtype=">u4").astype(np.int64) - 1
             # Convert each keyframe sample index to its PTS by walking the stts
             # run-length table (stts gives durations, not absolute PTS).
             if n_stts == 1:
@@ -225,7 +214,7 @@ def read_metadata_from_moov(video_path):
                 # of that run, so (kf_samples - prev[idx]) is the offset within it.
                 boundaries = np.cumsum(counts)
                 pts_starts = np.concatenate([[0], np.cumsum(counts[:-1] * deltas[:-1])])
-                idx = np.searchsorted(boundaries, kf_samples, side='right')
+                idx = np.searchsorted(boundaries, kf_samples, side="right")
                 prev = np.concatenate([[0], boundaries[:-1]])
                 kf_pts = pts_starts[idx] + (kf_samples - prev[idx]) * deltas[idx]
 
@@ -274,7 +263,7 @@ class CFRVideoReader:
         *,
         format: str = "rgb24",
         thread_type: str = "NONE",
-        **kwargs  # used for initialization
+        **kwargs,  # used for initialization
     ):
         self.video_path = video_path
         self.format = format
@@ -288,8 +277,8 @@ class CFRVideoReader:
         # default is 'NONE'; 'AUTO' is opt-in for verified single-process / no-fork
         # contexts. An explicit 'AUTO' is still downgraded inside a forked child as
         # a backstop. thread_type only affects decode parallelism, never the pixels.
-        if thread_type == 'AUTO' and self.is_forked():
-            thread_type = 'NONE'
+        if thread_type == "AUTO" and self.is_forked():
+            thread_type = "NONE"
         self.thread_type = thread_type
 
         for key, value in kwargs.items():
@@ -299,7 +288,7 @@ class CFRVideoReader:
         # in one file open. No av.open in __init__ — moov index is tiny (a few MB)
         # so this is sub-second even on multi-GB videos. Skip when caller passed
         # pre-computed values via **kwargs (e.g. cached metadata).
-        if not (hasattr(self, 'fps') and hasattr(self, 'shape') and hasattr(self, 'keyframe_pts')):
+        if not (hasattr(self, "fps") and hasattr(self, "shape") and hasattr(self, "keyframe_pts")):
             try:
                 meta = read_metadata_from_moov(self.video_path)
                 if self.format in ("rgb24", "bgr24"):
@@ -308,17 +297,22 @@ class CFRVideoReader:
                     c = 1
                 else:
                     c = 3
-                self.fps = meta['fps']
-                self.duration = meta['duration']
-                self.time_base = meta['time_base']
-                self.shape = (meta['n_frames'], meta['height'], meta['width'], c)
-                kf = meta['keyframe_pts']
+                self.fps = meta["fps"]
+                self.duration = meta["duration"]
+                self.time_base = meta["time_base"]
+                self.shape = (meta["n_frames"], meta["height"], meta["width"], c)
+                kf = meta["keyframe_pts"]
                 # keyframe_pts is None when stss is absent, i.e. EVERY frame is a
                 # keyframe. Synthesize one PTS per frame on the CFR grid: ticks
                 # per frame = round(1 / (time_base * fps)) = timescale / fps =
                 # the stts delta. max(..., 1e-9) just guards against div-by-zero
                 # if metadata was degenerate.
-                self.keyframe_pts = kf if kf is not None else np.arange(meta['n_frames'], dtype=np.int64) * int(round(1.0 / max(meta['time_base'] * meta['fps'], 1e-9)))
+                self.keyframe_pts = (
+                    kf
+                    if kf is not None
+                    else np.arange(meta["n_frames"], dtype=np.int64)
+                    * int(round(1.0 / max(meta["time_base"] * meta["fps"], 1e-9)))
+                )
             except (ValueError, struct.error, OSError):
                 # Non-mp4 / unsupported container: fall back to av-based probes.
                 self.get_fps()
@@ -328,7 +322,7 @@ class CFRVideoReader:
         self.keyframe_pts = np.asarray(self.keyframe_pts)
 
     def get_fps(self) -> float:
-        if hasattr(self, 'fps'):
+        if hasattr(self, "fps"):
             return self.fps
         """Robustly determine FPS from stream metadata."""
         with av.open(self.video_path) as container:
@@ -360,21 +354,28 @@ class CFRVideoReader:
             self.fps = float(stream.base_rate)
 
     @property
-    def f(self): return self.shape[0]
+    def f(self):
+        return self.shape[0]
+
     @property
-    def h(self): return self.shape[1]
+    def h(self):
+        return self.shape[1]
+
     @property
-    def w(self): return self.shape[2]
+    def w(self):
+        return self.shape[2]
+
     @property
-    def c(self): return self.shape[3]
+    def c(self):
+        return self.shape[3]
 
     def get_video_meta(self):
         return {
-            'fps': self.fps,
-            'duration': self.duration,
-            'time_base': self.time_base,
-            'shape': self.shape,
-            'keyframe_pts': self.keyframe_pts.tolist(),
+            "fps": self.fps,
+            "duration": self.duration,
+            "time_base": self.time_base,
+            "shape": self.shape,
+            "keyframe_pts": self.keyframe_pts.tolist(),
         }
 
     def get_shape(self) -> Tuple[int, int, int, int]:
@@ -382,7 +383,7 @@ class CFRVideoReader:
         Returns (Frames, Height, Width, Channels).
         Opens the file briefly to probe metadata.
         """
-        if hasattr(self, 'shape'):
+        if hasattr(self, "shape"):
             return self.shape
 
         # Open briefly just to probe
@@ -429,13 +430,13 @@ class CFRVideoReader:
     def get_keyframe_pts(self) -> List[int]:
         """Extract keyframe PTS. Tries fast moov atom parse first, falls back
         to av demux for non-mp4 containers."""
-        if hasattr(self, 'keyframe_pts'):
+        if hasattr(self, "keyframe_pts"):
             return self.keyframe_pts
 
         try:
             meta = read_metadata_from_moov(self.video_path)
-            if meta['keyframe_pts'] is not None:
-                self.keyframe_pts = meta['keyframe_pts']
+            if meta["keyframe_pts"] is not None:
+                self.keyframe_pts = meta["keyframe_pts"]
                 return self.keyframe_pts
         except (ValueError, struct.error, OSError):
             pass
@@ -452,14 +453,16 @@ class CFRVideoReader:
     def __len__(self):
         return self.f
 
-    def get_batch(self,
-                  frame_inds: Union[np.ndarray, Iterable[int]],
-                  unique_and_sorted: bool = False,
-                  return_unstacked: bool = False,
-                  return_channel_first: bool = False,
-                  return_tensor: bool = False,
-                  ratio: float = 1.0,
-                  size: List[int] = None) -> np.ndarray:
+    def get_batch(
+        self,
+        frame_inds: Union[np.ndarray, Iterable[int]],
+        unique_and_sorted: bool = False,
+        return_unstacked: bool = False,
+        return_channel_first: bool = False,
+        return_tensor: bool = False,
+        ratio: float = 1.0,
+        size: List[int] = None,
+    ) -> np.ndarray:
         """
         Main decoding function.
         Opens file -> Seeks -> Decodes -> Closes file.
@@ -486,7 +489,9 @@ class CFRVideoReader:
         # is round(idx * delta); the round() lands exactly on the integer tick
         # grid (e.g. multiples of 512) that the `frame.pts in group` test below
         # depends on — which is why fps must be the stts MODE, not an average.
-        unique_frame_pts = np.round(unique_frame_inds / self.fps / self.time_base).astype(np.int64)  # get the pts values for target frames
+        unique_frame_pts = np.round(unique_frame_inds / self.fps / self.time_base).astype(
+            np.int64
+        )  # get the pts values for target frames
 
         # Group target pts by the keyframe that precedes them, so we seek once
         # per keyframe and decode forward through all wanted frames in that GOP.
@@ -494,13 +499,19 @@ class CFRVideoReader:
         # each pts. Because unique_frame_pts is sorted, the keyframe indices are
         # non-decreasing, so np.split at the per-keyframe counts partitions the
         # sorted pts into contiguous groups (G groups, g frames each).
-        keyframe_inds = np.searchsorted(self.keyframe_pts, unique_frame_pts, side='right') - 1  # the keyframe corresponding to the indices we want
+        keyframe_inds = (
+            np.searchsorted(self.keyframe_pts, unique_frame_pts, side="right") - 1
+        )  # the keyframe corresponding to the indices we want
         unique_keyframe_inds, counts = np.unique(keyframe_inds, return_counts=True)  # G
         unique_keyframe_pts = self.keyframe_pts[unique_keyframe_inds]  # G
-        unique_frame_pts_groups = np.split(unique_frame_pts, np.cumsum(counts)[:-1])  # list of pts in the same group, G: g
+        unique_frame_pts_groups = np.split(
+            unique_frame_pts, np.cumsum(counts)[:-1]
+        )  # list of pts in the same group, G: g
 
         unique_frames = []
-        loaded = 0  # frames committed by COMPLETED groups; len(unique_frames)-loaded = progress in current group
+        loaded = (
+            0  # frames committed by COMPLETED groups; len(unique_frames)-loaded = progress in current group
+        )
 
         with av.open(self.video_path) as container:
             stream = container.streams.video[0]
@@ -535,7 +546,9 @@ class CFRVideoReader:
                         break  # safety break
 
                 if len(unique_frames) - loaded != len(group):
-                    raise RuntimeError(f'Expected {len(group)} frames to be decoded, only got {len(unique_frames) - loaded}')
+                    raise RuntimeError(
+                        f"Expected {len(group)} frames to be decoded, only got {len(unique_frames) - loaded}"
+                    )
 
                 loaded += len(group)
 
@@ -552,6 +565,7 @@ class CFRVideoReader:
 
         if return_tensor:
             import torch
+
             if isinstance(frames, np.ndarray):
                 frames = torch.from_numpy(frames)
             else:
@@ -594,11 +608,7 @@ class TorchCodecVideoReader:
     and exact PTS matching natively without memory leaks.
     """
 
-    def __init__(
-        self,
-        video_path: str,
-        **kwargs
-    ):
+    def __init__(self, video_path: str, **kwargs):
         import torchcodec
 
         self.video_path = video_path
@@ -626,13 +636,20 @@ class TorchCodecVideoReader:
         self.shape = (f, h, w, c)
 
     @property
-    def f(self): return self.shape[0]
+    def f(self):
+        return self.shape[0]
+
     @property
-    def h(self): return self.shape[1]
+    def h(self):
+        return self.shape[1]
+
     @property
-    def w(self): return self.shape[2]
+    def w(self):
+        return self.shape[2]
+
     @property
-    def c(self): return self.shape[3]
+    def c(self):
+        return self.shape[3]
 
     def __len__(self):
         return self.f
@@ -645,7 +662,7 @@ class TorchCodecVideoReader:
         return_channel_first: bool = False,
         return_tensor: bool = False,
         ratio: float = 1.0,
-        size: List[int] = None
+        size: List[int] = None,
     ) -> Union[np.ndarray, list]:
 
         import torch.nn.functional as F
@@ -672,11 +689,15 @@ class TorchCodecVideoReader:
             # F.interpolate requires float tensor
             frames_tensor = frames_tensor.float()
             if size is not None:
-                frames_tensor = F.interpolate(frames_tensor, size=(size[0], size[1]), mode='bilinear', align_corners=False)
+                frames_tensor = F.interpolate(
+                    frames_tensor, size=(size[0], size[1]), mode="bilinear", align_corners=False
+                )
             elif ratio != 1.0:
                 Ho = int(self.h * ratio + 1e-6)
                 Wo = int(self.w * ratio + 1e-6)
-                frames_tensor = F.interpolate(frames_tensor, size=(Ho, Wo), mode='bilinear', align_corners=False)
+                frames_tensor = F.interpolate(
+                    frames_tensor, size=(Ho, Wo), mode="bilinear", align_corners=False
+                )
             frames_tensor = frames_tensor.byte()
 
         # Handle channel dimension (torchcodec is N, C, H, W by default)
@@ -724,7 +745,7 @@ def write_video(filename: str, frames: np.ndarray, **kwargs):
     Optimized bulk video writer.
     """
     # 1. Handle Torch Tensors without importing torch globally
-    if hasattr(frames, 'cpu'):
+    if hasattr(frames, "cpu"):
         frames = frames.cpu().numpy()
 
     # 2. Vectorized Pre-processing (Faster than per-frame check)
@@ -757,7 +778,7 @@ class FFMPEGVideoWriter:
 
     def __init__(
         self,
-        filename='default.mp4',
+        filename="default.mp4",
         n_frames=500,  # stub argument, not used or required
         height=720,
         width=1280,
@@ -769,9 +790,9 @@ class FFMPEGVideoWriter:
         preset="veryslow",  # high quality
         # tune="zerolatency",  # would actually be easier to decode
         tune=None,
-        color_range='tv',  # use the default tv range
+        color_range="tv",  # use the default tv range
         movflags="+faststart",
-        hwaccel='none',
+        hwaccel="none",
         loglevel="error",
         # Small GOP so a CFRVideoReader random seek decodes few frames forward
         # from the keyframe (every ~12 frames is an I-frame). Trades file size
@@ -787,36 +808,48 @@ class FFMPEGVideoWriter:
         # Base Command
         command = [
             "ffmpeg",
-            "-threads", str(threads),
+            "-threads",
+            str(threads),
             "-y",
             "-hide_banner",
-            "-loglevel", loglevel,
-
+            "-loglevel",
+            loglevel,
             # Input Settings.
             # Input is fixed rawvideo rgb24 over stdin: the writer's contract is
             # that frames piped in are contiguous uint8 H*W*3 RGB (what
             # write_video produces and submit_frame validates). -s gives ffmpeg
             # the frame geometry since rawvideo carries no header.
-            "-f", "rawvideo",
-            "-vcodec", "rawvideo",
-            "-s", f"{width}x{height}",
-            "-pix_fmt", "rgb24",
-            "-r", str(fps),
-            "-i", "-",  # Stdin
-
+            "-f",
+            "rawvideo",
+            "-vcodec",
+            "rawvideo",
+            "-s",
+            f"{width}x{height}",
+            "-pix_fmt",
+            "rgb24",
+            "-r",
+            str(fps),
+            "-i",
+            "-",  # Stdin
             # Output Settings
             "-an",  # no audio
-            "-vcodec", encoding,
+            "-vcodec",
+            encoding,
             # This occurrence is output-scoped; the earlier one is input-scoped.
-            "-threads", str(threads),
-            "-pix_fmt", pix_fmt,
-            "-color_range", color_range,
-            "-movflags", movflags,
-            "-g", str(gop_size),  # small GOP for ultrafast decoding
+            "-threads",
+            str(threads),
+            "-pix_fmt",
+            pix_fmt,
+            "-color_range",
+            color_range,
+            "-movflags",
+            movflags,
+            "-g",
+            str(gop_size),  # small GOP for ultrafast decoding
         ]
 
         # HW Acceleration Injection
-        if hwaccel != 'none':
+        if hwaccel != "none":
             command.insert(1, "-hwaccel")
             command.insert(2, hwaccel)
 
@@ -863,7 +896,11 @@ class FFMPEGVideoWriter:
     def submit_frame(self, frame: np.ndarray):
         """Legacy support for single frame."""
         if frame.dtype != np.uint8:
-            frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8) if frame.max() <= 1.0 else frame.astype(np.uint8)
+            frame = (
+                (np.clip(frame, 0, 1) * 255).astype(np.uint8)
+                if frame.max() <= 1.0
+                else frame.astype(np.uint8)
+            )
         if frame.shape != (self.height, self.width, 3):
             raise ValueError(f"Expected frame shape {(self.height, self.width, 3)}, got {frame.shape}")
         self.ffmpeg_proc.stdin.write(frame.tobytes())
@@ -873,6 +910,4 @@ class FFMPEGVideoWriter:
             self.ffmpeg_proc.stdin.close()
         return_code = self.ffmpeg_proc.wait()
         if return_code != 0:
-            raise RuntimeError(
-                f"ffmpeg exited with code {return_code} while writing {self.filename}"
-            )
+            raise RuntimeError(f"ffmpeg exited with code {return_code} while writing {self.filename}")

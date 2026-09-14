@@ -2,27 +2,29 @@
 
 import json
 import os
-from pathlib import Path
 import random
 import uuid
 from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.distributed as dist
 
 from utils.config import recipe_digest
-from h3.utils.model import canonical_name
+from utils.distributed import canonical_name
 from utils.ema import decay_change_preserves_history
 
 FLOW_CONVENTION = "h3_t1_clean_data_minus_noise"
 
 
 def rng_state():
-    return dict(python=random.getstate(),
-                numpy=np.random.get_state(),
-                torch=torch.get_rng_state(),
-                cuda=torch.cuda.get_rng_state() if torch.cuda.is_available() else None)
+    return dict(
+        python=random.getstate(),
+        numpy=np.random.get_state(),
+        torch=torch.get_rng_state(),
+        cuda=torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+    )
 
 
 def restore_rng(state):
@@ -46,19 +48,23 @@ def save_checkpoint(model, optimizer, cfg, step, stage, runtime, directory, ema=
         dist.broadcast_object_list(generation, src=0)
     path = Path(directory) / f"step_{step:09d}_{generation[0]}"
     path.mkdir(parents=True, exist_ok=True)
-    weights = {canonical_name(n): p.detach().cpu().clone() for n, p in model.named_parameters() if p.requires_grad}
-    state = dict(flow_convention=FLOW_CONVENTION,
-                 recipe=recipe_digest(cfg),
-                 step=step,
-                 stage=stage,
-                 world_size=world,
-                 fs_size=cfg.fs_size,
-                 sp_size=cfg.sp_size,
-                 weights=weights,
-                 ema=ema.state_dict() if ema is not None else None,
-                 optimizer=optimizer.state_dict(),
-                 rng=rng_state(),
-                 runtime=runtime)
+    weights = {
+        canonical_name(n): p.detach().cpu().clone() for n, p in model.named_parameters() if p.requires_grad
+    }
+    state = dict(
+        flow_convention=FLOW_CONVENTION,
+        recipe=recipe_digest(cfg),
+        step=step,
+        stage=stage,
+        world_size=world,
+        fs_size=cfg.fs_size,
+        sp_size=cfg.sp_size,
+        weights=weights,
+        ema=ema.state_dict() if ema is not None else None,
+        optimizer=optimizer.state_dict(),
+        rng=rng_state(),
+        runtime=runtime,
+    )
     target = path / f"rank{rank:05d}.pt"
     temp = target.with_suffix(f".{os.getpid()}.tmp")
     torch.save(state, temp)
@@ -66,14 +72,18 @@ def save_checkpoint(model, optimizer, cfg, step, stage, runtime, directory, ema=
     if dist.is_initialized():
         dist.barrier()
     if rank == 0:
-        manifest = dict(step=step,
-                        stage=stage,
-                        world_size=world,
-                        recipe=state["recipe"],
-                        flow_convention=FLOW_CONVENTION,
-                        ema=ema is not None,
-                        ema_updates=ema.num_updates if ema is not None else 0,
-                        files=[f"rank{r:05d}.pt" for r in range(world)])
+        # The manifest is the commit marker: readers must never resume a
+        # checkpoint until every rank has finished its raw/EMA/optimizer shard.
+        manifest = dict(
+            step=step,
+            stage=stage,
+            world_size=world,
+            recipe=state["recipe"],
+            flow_convention=FLOW_CONVENTION,
+            ema=ema is not None,
+            ema_updates=ema.num_updates if ema is not None else 0,
+            files=[f"rank{r:05d}.pt" for r in range(world)],
+        )
         temporary = path / "manifest.tmp"
         temporary.write_text(json.dumps(manifest, indent=2) + "\n")
         os.replace(temporary, path / "manifest.json")
@@ -86,12 +96,17 @@ def save_checkpoint(model, optimizer, cfg, step, stage, runtime, directory, ema=
     return path
 
 
-def load_checkpoint(model, optimizer, cfg, directory, restore_random=True, ema=None, weights="raw",
-                    ema_schedule_change=None):
+def load_checkpoint(
+    model, optimizer, cfg, directory, restore_random=True, ema=None, weights="raw", ema_schedule_change=None
+):
     if weights not in ("raw", "ema") or (weights == "ema" and (optimizer is not None or ema is not None)):
         raise ValueError("EMA weights are for inference; optimizer resume requires raw weights")
-    if ema_schedule_change is not None and (not isinstance(ema_schedule_change, str)
-            or not ema_schedule_change.strip() or optimizer is None or ema is None):
+    if ema_schedule_change is not None and (
+        not isinstance(ema_schedule_change, str)
+        or not ema_schedule_change.strip()
+        or optimizer is None
+        or ema is None
+    ):
         raise ValueError("An EMA schedule change requires an explicit reason and raw optimizer/EMA resume")
     path = Path(directory)
     if path.is_file() and path.name == "latest.json":
@@ -102,8 +117,12 @@ def load_checkpoint(model, optimizer, cfg, directory, restore_random=True, ema=N
         raise ValueError("Sharded resume requires the saved world size; consolidate before changing topology")
     # Inference reads only the selected weights; avoid eagerly reading the
     # optimizer and queued training data from the same shard file.
-    state = torch.load(path / f"rank{rank:05d}.pt", map_location="cpu", weights_only=False,
-                       mmap=optimizer is None and ema is None)
+    state = torch.load(
+        path / f"rank{rank:05d}.pt",
+        map_location="cpu",
+        weights_only=False,
+        mmap=optimizer is None and ema is None,
+    )
     if manifest["recipe"] != state["recipe"]:
         raise ValueError("Checkpoint manifest and rank recipe differ")
     if manifest["recipe"] != recipe_digest(cfg):
@@ -113,25 +132,39 @@ def load_checkpoint(model, optimizer, cfg, directory, restore_random=True, ema=N
             previous_cfg.ema_weight = saved_ema["decay"]
             if ema_schedule_change is not None:
                 previous_cfg.ema_warmup = saved_ema["warmup"]
-        compatible = (saved_ema is not None and cfg.ema_weight
-                      and (ema_schedule_change is not None or
-                           decay_change_preserves_history(saved_ema, cfg.ema_weight, cfg.get("ema_warmup", True)))
-                      and manifest["recipe"] == recipe_digest(previous_cfg))
+        compatible = (
+            saved_ema is not None
+            and cfg.ema_weight
+            and (
+                ema_schedule_change is not None
+                or decay_change_preserves_history(saved_ema, cfg.ema_weight, cfg.get("ema_warmup", True))
+            )
+            and manifest["recipe"] == recipe_digest(previous_cfg)
+        )
         if not compatible:
             raise ValueError("WorldViews settings differ from the saved checkpoint")
         if ema_schedule_change is not None:
             state["ema_schedule_change"] = dict(
                 previous=dict(decay=saved_ema["decay"], warmup=saved_ema["warmup"]),
                 current=dict(decay=float(cfg.ema_weight), warmup=bool(cfg.get("ema_warmup", True))),
-                step=state["step"], reason=ema_schedule_change, saved_history_preserved=True,
-                history_identical_to_new_schedule=False)
+                step=state["step"],
+                reason=ema_schedule_change,
+                saved_history_preserved=True,
+                history_identical_to_new_schedule=False,
+            )
             if rank == 0:
                 print(f"Explicit EMA schedule transition: {state['ema_schedule_change']}", flush=True)
         else:
-            state["ema_decay_change"] = dict(previous=saved_ema["decay"], current=float(cfg.ema_weight),
-                                             step=state["step"], history_identical=True)
+            state["ema_decay_change"] = dict(
+                previous=saved_ema["decay"],
+                current=float(cfg.ema_weight),
+                step=state["step"],
+                history_identical=True,
+            )
             if rank == 0:
-                print(f"EMA decay cap changed before warmup saturation: {state['ema_decay_change']}", flush=True)
+                print(
+                    f"EMA decay cap changed before warmup saturation: {state['ema_decay_change']}", flush=True
+                )
     if state.get("flow_convention") != FLOW_CONVENTION:
         raise ValueError("Checkpoint has an incompatible flow convention")
     if state["fs_size"] != cfg.fs_size or state["sp_size"] != cfg.sp_size:

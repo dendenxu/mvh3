@@ -1,29 +1,38 @@
 """Run image/camera requests with the native or chunked H3 sampler."""
 
-from functools import partial
 import json
-from pathlib import Path
 import time
+from functools import partial
+from pathlib import Path
 
 import torch
 from omegaconf import OmegaConf
 
-from h3.checkpoint import load_original_transformer
-from h3.distributed.fsdp import wrap_model, wrap_text, compile_blocks
-from pipeline.ar_inference import generate as generate_chunks
+from h3.distributed.fsdp import compile_blocks, wrap_model, wrap_text
+from h3.encoders import TextEncoder, VideoEncoder
+from h3.modules.model import MiniMaxH3Transformer3DModel
+from pipeline.chunked_inference import generate as generate_chunks
+from pipeline.full_sequence_inference import generate as generate_joint
 from pipeline.i2v_input import prepare_request
-from pipeline.joint_inference import generate as generate_joint
 from utils import distributed as groups
 from utils.checkpoint import load_checkpoint
-from utils.config import validate_config, recipe_digest
-from utils.h3_wrapper import VideoEncoder, TextEncoder
-from utils.video import write_video
-from utils.tracking import Tracker
+from utils.config import recipe_digest, validate_config
 from utils.ema import inference_weight_kind
+from utils.tracking import Tracker
+from utils.video import write_video
 
 
-def run(cfg, request_path, output, checkpoint=None, protocol="auto", seed=81000, steps=None, camera=True,
-        verify_init=False):
+def run_inference(
+    cfg,
+    request_path,
+    output,
+    checkpoint=None,
+    protocol="auto",
+    seed=81000,
+    steps=None,
+    camera=True,
+    verify_init=False,
+):
     """Encode requests, load raw/EMA weights, sample videos and save tracked outputs.
 
     Both main.py and the standalone CLI call this function. The joint protocol
@@ -49,14 +58,16 @@ def run(cfg, request_path, output, checkpoint=None, protocol="auto", seed=81000,
     if tracker.run:
         tracker.run.summary.update({"operation": "inference", "camera_enabled": camera, "protocol": protocol})
     try:
+        # Step 1: Encode image/caption inputs and build the requested camera path.
         text_encoder = TextEncoder(cfg, wrap=partial(wrap_text, cfg=cfg), device=device)
         video_encoder = VideoEncoder(cfg.h3.vae, device, cfg.vae_compile)
         prepared = []
         for request_path in paths:
             started = time.monotonic()
             request = json.loads(request_path.read_text())
-            document = prepare_request(request, request_path.parent, video_encoder, text_encoder, cfg,
-                                       chunked=protocol == "ar")
+            document = prepare_request(
+                request, request_path.parent, video_encoder, text_encoder, cfg, chunked=protocol == "ar"
+            )
             if verify_init:
                 for view in document["views"]:
                     if not torch.equal(view["pose"], view["pose"][:1].expand_as(view["pose"])):
@@ -67,12 +78,18 @@ def run(cfg, request_path, output, checkpoint=None, protocol="auto", seed=81000,
         # prepared requests across cases without constructing a training dataset.
         video_encoder.model.to("cpu")
         torch.cuda.empty_cache()
-        model = load_original_transformer(cfg.h3.checkpoint, progress=print if groups.get_rank() == 0 else None)
+
+        # Step 2: Load base weights, then the requested raw/EMA training weights.
+        model = MiniMaxH3Transformer3DModel.from_pretrained(
+            cfg.h3.checkpoint,
+            progress=print if groups.get_rank() == 0 else None,
+        )
         model.configure_attention(cfg)
         model = wrap_model(model, cfg)
         if checkpoint:
-            state = load_checkpoint(model, None, cfg, checkpoint, restore_random=False,
-                                    weights=inference_weight_kind(cfg))
+            state = load_checkpoint(
+                model, None, cfg, checkpoint, restore_random=False, weights=inference_weight_kind(cfg)
+            )
             checkpoint_step = state["step"]
             if tracker.run:
                 tracker.run.summary["inference/weights"] = inference_weight_kind(cfg)
@@ -95,11 +112,20 @@ def run(cfg, request_path, output, checkpoint=None, protocol="auto", seed=81000,
                 parity.append(dict(evaluation=index, max_abs_error=error))
                 if error != 0:
                     raise AssertionError(
-                        f"Static-camera initialization differs from base at evaluation {index}: {error}")
+                        f"Static-camera initialization differs from base at evaluation {index}: {error}"
+                    )
 
             if protocol == "joint":
-                outputs = generate_joint(model, document, None, cfg, device, steps=steps, camera=camera,
-                                         observer=compare_init if verify_init else None)
+                outputs = generate_joint(
+                    model,
+                    document,
+                    None,
+                    cfg,
+                    device,
+                    steps=steps,
+                    camera=camera,
+                    observer=compare_init if verify_init else None,
+                )
             else:
                 if not camera:
                     raise ValueError("--no-camera is a native joint parity control")
@@ -115,30 +141,53 @@ def run(cfg, request_path, output, checkpoint=None, protocol="auto", seed=81000,
                 torch.save(document, directory / "request_features.pt")
                 video_encoder.model.to(device)
                 for index, (latent, view) in enumerate(zip(outputs, document["views"])):
-                    pixels = video_encoder.decode(latent, view["height"], view["width"], view["source_frames"])
-                    write_video(str(directory / f"view{index:03d}.mp4"),
-                                pixels.permute(0, 2, 3, 1).mul(255).byte().numpy(), fps=view["fps"])
+                    pixels = video_encoder.decode(
+                        latent, view["height"], view["width"], view["source_frames"]
+                    )
+                    write_video(
+                        str(directory / f"view{index:03d}.mp4"),
+                        pixels.permute(0, 2, 3, 1).mul(255).byte().numpy(),
+                        fps=view["fps"],
+                    )
                 video_encoder.model.to("cpu")
-                report = dict(status="complete", request=request, request_path=str(request_path.resolve()),
-                              checkpoint=str(checkpoint), checkpoint_step=checkpoint_step, seed=seed,
-                              recipe=recipe_digest(cfg), protocol=protocol, camera=camera,
-                              sigma_points=steps or cfg.sampling_steps, guidance_scale=cfg.guidance_scale, audio=False,
-                              ground_truth_loaded=False, encoding_seconds=encode_seconds,
-                              denoise_seconds=denoise_seconds, total_seconds=time.monotonic() - started,
-                              peak_gpu_allocated_gib=torch.cuda.max_memory_allocated() / 1024**3)
+                report = dict(
+                    status="complete",
+                    request=request,
+                    request_path=str(request_path.resolve()),
+                    checkpoint=str(checkpoint),
+                    checkpoint_step=checkpoint_step,
+                    seed=seed,
+                    recipe=recipe_digest(cfg),
+                    protocol=protocol,
+                    camera=camera,
+                    sigma_points=steps or cfg.sampling_steps,
+                    guidance_scale=cfg.guidance_scale,
+                    audio=False,
+                    ground_truth_loaded=False,
+                    encoding_seconds=encode_seconds,
+                    denoise_seconds=denoise_seconds,
+                    total_seconds=time.monotonic() - started,
+                    peak_gpu_allocated_gib=torch.cuda.max_memory_allocated() / 1024**3,
+                )
                 if verify_init:
-                    report["initialization_parity"] = dict(status="passed", checks=parity,
-                                                           all_solver_predictions_exact=True)
+                    report["initialization_parity"] = dict(
+                        status="passed", checks=parity, all_solver_predictions_exact=True
+                    )
                 (directory / "inference.json").write_text(json.dumps(report, indent=2) + "\n")
                 tracker.log(
                     {
                         "inference/denoise_seconds": denoise_seconds,
                         "inference/encoding_seconds": encode_seconds,
                         "inference/request": str(request_path),
-                        "inference/checkpoint_step": checkpoint_step
-                    }, case)
+                        "inference/checkpoint_step": checkpoint_step,
+                    },
+                    case,
+                )
                 tracker.media(directory, case, f"inference/case{case}")
-                print(json.dumps(dict(case=case, output=str(directory), denoise_seconds=denoise_seconds)), flush=True)
+                print(
+                    json.dumps(dict(case=case, output=str(directory), denoise_seconds=denoise_seconds)),
+                    flush=True,
+                )
             groups.barrier()
     except BaseException:
         tracker.finish(success=False)

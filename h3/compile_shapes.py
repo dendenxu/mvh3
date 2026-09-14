@@ -13,8 +13,7 @@ def pad_rows(value, dimension, multiple, *, repeat=False):
         return value
     shape = list(value.shape)
     shape[dimension] = padding
-    tail = (value.narrow(dimension, 0, 1).expand(shape) if repeat
-            else value.new_zeros(shape))
+    tail = value.narrow(dimension, 0, 1).expand(shape) if repeat else value.new_zeros(shape)
     return torch.cat((value, tail), dim=dimension)
 
 
@@ -26,6 +25,8 @@ def pad_camera(camera, multiple):
         # rotations/projections valid without adding camera observations.
         return pad_rows(camera, 1, multiple, repeat=True)
     if is_dataclass(camera):
-        return replace(camera, **{field.name: pad_camera(getattr(camera, field.name), multiple)
-                                  for field in fields(camera)})
+        return replace(
+            camera,
+            **{field.name: pad_camera(getattr(camera, field.name), multiple) for field in fields(camera)},
+        )
     return camera

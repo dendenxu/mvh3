@@ -2,43 +2,40 @@
 # Loads multiple synchronized real-world camera streams per scene from a parquet
 # metadata file. Conceptually multi-view (like MVGame) but storage-shaped like
 # StaticDataset (parquet + TorchCodec + lazy pose loading).
-from typing import List, Dict, Any, Optional
-from torch.utils.data import Dataset, get_worker_info
-
-import os
 import json
 import math
-import time
-import torch
 import random
+import time
+from os.path import basename, dirname, isabs, isfile, join, splitext
+from typing import List
+
 import numpy as np
 import pyarrow.parquet as pq
+import torch
+from torch.utils.data import Dataset, get_worker_info
 
-from utils.console import *
-from utils.math_utils import affine_padding
-from utils.math_utils import affine_inverse
-from utils.math_utils import ixt_inverse
-from utils.math_utils import ixt_padding
-from utils.distributed import get_rank
-from utils.distributed import get_world_size
-from utils.distributed import is_main_process
-from utils.distributed import is_node_main
 import utils.video as video_utils
-from utils.video import TorchCodecVideoReader
-from utils.misc import set_seed
-from utils.parallel import parallel_execution
-from dataset.mvgame import video_augmentation
-from dataset.mvgame import image_augmentation
-from dataset.mvgame import gamma_correct
-from dataset.mvgame import compute_sequence_gamma
-from dataset.mvgame import LOOSE_EXPOSURE_BAND
-from dataset.mvgame import normalize_ixt
-from dataset.mvgame import normalize_cam_translation
-from dataset.mvgame import select_pose_stable_factor
-from dataset.mvgame import pack_factory
-from dataset.mvgame import make_strip_pack
-from dataset.static import parse_pose_column
 from dataset.fps_remap import resolve_fps_remap
+from dataset.mvgame import (
+    LOOSE_EXPOSURE_BAND,
+    compute_sequence_gamma,
+    gamma_correct,
+    image_augmentation,
+    make_strip_pack,
+    normalize_cam_translation,
+    normalize_ixt,
+    pack_factory,
+    select_pose_stable_factor,
+    video_augmentation,
+)
+from dataset.static import parse_pose_column
+from utils.base_utils import dotdict
+from utils.console import blue, green, log, red, stacktrace, yellow
+from utils.distributed import get_rank, get_world_size, is_node_main
+from utils.math_utils import affine_inverse, affine_padding, ixt_inverse, ixt_padding
+from utils.parallel import parallel_execution
+from utils.random import set_seed
+from utils.video import TorchCodecVideoReader
 
 
 def parse_pose_column_egoexo4d(pose_flat: np.ndarray, num_frames_per_cam: List[int]):
@@ -58,7 +55,7 @@ def parse_pose_column_egoexo4d(pose_flat: np.ndarray, num_frames_per_cam: List[i
     n_cams = len(num_frames_per_cam)
     # Infer max_frames from actual pose size instead of trusting num_frames
     max_nf = pose_flat.size // (n_cams * 10)
-    pose_5d = pose_flat[:n_cams * max_nf * 10].reshape(n_cams, max_nf, 10)
+    pose_5d = pose_flat[: n_cams * max_nf * 10].reshape(n_cams, max_nf, 10)
 
     cams_per_view = []
     for cam_idx in range(n_cams):
@@ -85,64 +82,56 @@ class MultiViewRealDataset(Dataset):
     compatibility with gather_mixed_batch co-training.
     """
 
-    def __init__(self,
-                 data_path: str,
-                 data_root: str = None,  # base dir for relative video_path; defaults to parquet's parent dir
-                 gen_size: int = 60,
-                 height: int = 448,
-                 width: int = 832,
-
-                 mv_size: int = 5,  # number of views to produce per sample
-                 num_cameras: int = None,  # physical cameras in data (defaults to mv_size; set higher to randomly subsample)
-                 dataset_fps: int = 30,
-                 model_fps: int = 24,
-                 per_worker_threads: int = 4,
-
-                 # Sequence sampling
-                 seq_sample: List[int] = (0, None, 1),
-
-                 # Overfitting
-                 overfit: bool = False,
-                 overfit_seq_sample: List[int] = (0, 1, 1),
-
-                 config=dotdict({'sp_size': 1, 'model': {'vae_stride': [4, 8, 8]}}),
-                 pose_norm_target: float = 1.0,
-                 pose_stable_factors=1.0,
-
-                 # Augmentation: disabled by default for real data
-                 disable_augmentation_ratio: float = 1.0,
-                 image_aug: bool = False,         # mvgame-style image aug (gblur/color jitter/noise); gated by disable_aug
-                 gamma_correction: bool = False,  # mvgame-style aggressive lift-to-0.25 (mvgame_raw); applied regardless of disable_aug
-                 exposure_clamp: bool = False,    # loose two-sided exposure clamp for real data (only extreme tails fire); see compute_sequence_gamma + LOOSE_EXPOSURE_BAND
-                 max_fov_h_deg: float = None,     # cap output h-FoV by per-frame s_min floor (None=off)
-                 sp_sharding: bool = False,
-
-                 sampling_weight_power: float = 0.8,  # default MUST match aggregator's getattr fallback (0.8); the attr is always set here so the fallback never fires
-
-                 # Per-camera video filename template relative to video_path.
-                 # Default matches EgoExo4D/Waymo layout ('<scene>/0.mp4' ... '<scene>/N-1.mp4').
-                 # Override for mvgame-raw: 'video/{c:06d}.mp4'.
-                 video_path_template: str = '{c}.mp4',
-
-                 # If True, resize frames so they just cover the target (max-ratio).
-                 # Default True preserves egoexo4d/waymo behavior. Set False to
-                 # match mvgame.py semantics (no pre-resize; video_augmentation
-                 # sees native-resolution frames and has full scale headroom).
-                 pre_resize: bool = True,
-
-                 # Per-sample shape pool (mirrors StaticDataset.shape_pool).
-                 # Each entry's mv is auto-capped to NUM_CAMERAS. None = disabled.
-                 shape_pool=None,
-                 shape_pool_weights=None,
-
-                 # Video reader class name (looked up in utils.video).
-                 # 'TorchCodecVideoReader' (default): handles VFR/B-frames but
-                 # full file scan in __init__ — slow for multi-GB videos on NFS.
-                 # 'CFRVideoReader': av.open + moov keyframe_pts, sub-second init
-                 # at any file size; CFR only. Use for epic_fields, nymeria.
-                 video_reader: str = 'TorchCodecVideoReader',
-
-                 *args, **kwargs):
+    def __init__(
+        self,
+        data_path: str,
+        data_root: str = None,  # base dir for relative video_path; defaults to parquet's parent dir
+        gen_size: int = 60,
+        height: int = 448,
+        width: int = 832,
+        mv_size: int = 5,  # number of views to produce per sample
+        num_cameras: int = None,  # physical cameras in data (defaults to mv_size; set higher to randomly subsample)
+        dataset_fps: int = 30,
+        model_fps: int = 24,
+        per_worker_threads: int = 4,
+        # Sequence sampling
+        seq_sample: List[int] = (0, None, 1),
+        # Overfitting
+        overfit: bool = False,
+        overfit_seq_sample: List[int] = (0, 1, 1),
+        config=dotdict({"sp_size": 1, "model": {"vae_stride": [4, 8, 8]}}),
+        pose_norm_target: float = 1.0,
+        pose_stable_factors=1.0,
+        # Augmentation: disabled by default for real data
+        disable_augmentation_ratio: float = 1.0,
+        image_aug: bool = False,  # mvgame-style image aug (gblur/color jitter/noise); gated by disable_aug
+        gamma_correction: bool = False,  # mvgame-style aggressive lift-to-0.25 (mvgame_raw); applied regardless of disable_aug
+        exposure_clamp: bool = False,  # loose two-sided exposure clamp for real data (only extreme tails fire); see compute_sequence_gamma + LOOSE_EXPOSURE_BAND
+        max_fov_h_deg: float = None,  # cap output h-FoV by per-frame s_min floor (None=off)
+        sp_sharding: bool = False,
+        sampling_weight_power: float = 0.8,  # default MUST match aggregator's getattr fallback (0.8); the attr is always set here so the fallback never fires
+        # Per-camera video filename template relative to video_path.
+        # Default matches EgoExo4D/Waymo layout ('<scene>/0.mp4' ... '<scene>/N-1.mp4').
+        # Override for mvgame-raw: 'video/{c:06d}.mp4'.
+        video_path_template: str = "{c}.mp4",
+        # If True, resize frames so they just cover the target (max-ratio).
+        # Default True preserves egoexo4d/waymo behavior. Set False to
+        # match mvgame.py semantics (no pre-resize; video_augmentation
+        # sees native-resolution frames and has full scale headroom).
+        pre_resize: bool = True,
+        # Per-sample shape pool (mirrors StaticDataset.shape_pool).
+        # Each entry's mv is auto-capped to NUM_CAMERAS. None = disabled.
+        shape_pool=None,
+        shape_pool_weights=None,
+        # Video reader class name (looked up in utils.video).
+        # 'TorchCodecVideoReader' (default): handles VFR/B-frames but
+        # full file scan in __init__ — slow for multi-GB videos on NFS.
+        # 'CFRVideoReader': av.open + moov keyframe_pts, sub-second init
+        # at any file size; CFR only. Use for epic_fields, nymeria.
+        video_reader: str = "TorchCodecVideoReader",
+        *args,
+        **kwargs,
+    ):
         self.sampling_weight_power = sampling_weight_power
         self.video_path_template = video_path_template
         self.video_reader_cls = getattr(video_utils, video_reader)
@@ -155,7 +144,7 @@ class MultiViewRealDataset(Dataset):
         # threads have headroom. Set false to restore the serial baseline. NOTE:
         # aug-mvgame (MultiViewDataset) has its own long-standing parallel decode,
         # untouched by this flag.
-        self.parallel_view_decode = bool(kwargs.get('parallel_view_decode', True))
+        self.parallel_view_decode = bool(kwargs.get("parallel_view_decode", True))
         self.config = config
         self.data_path = data_path
         self.data_root = data_root or dirname(data_path)
@@ -167,7 +156,7 @@ class MultiViewRealDataset(Dataset):
         self.pose_norm_target = pose_norm_target
         psf = pose_stable_factors
         if isinstance(psf, str):
-            psf = [float(x) for x in psf.split(',')]
+            psf = [float(x) for x in psf.split(",")]
         self.pose_stable_factors = sorted(psf) if isinstance(psf, (list, tuple)) else [float(psf)]
         self.sp_sharding = sp_sharding
         self.per_worker_threads = per_worker_threads
@@ -209,8 +198,8 @@ class MultiViewRealDataset(Dataset):
         mv = self.mv_size
         assert mv in pack_factory, f"Supported mv sizes: {list(pack_factory.keys())}, got {mv}"
         pack = pack_factory[mv]
-        assert (self.height * pack['rs'] % 16 == 0).all(), "Packed sizes must be divisible by 16"
-        assert (self.width * pack['rs'] % 16 == 0).all(), "Packed sizes must be divisible by 16"
+        assert (self.height * pack["rs"] % 16 == 0).all(), "Packed sizes must be divisible by 16"
+        assert (self.width * pack["rs"] % 16 == 0).all(), "Packed sizes must be divisible by 16"
         self.pack = {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in pack.items()}
 
         # shape_pool: see StaticDataset.shape_pool. Per __getitem__ pick one
@@ -221,45 +210,50 @@ class MultiViewRealDataset(Dataset):
         # off-pool shape and biased sampling).
         self.shape_pool = [tuple(s) for s in (shape_pool or [])]
         if self.shape_pool:
-            assert all(len(s) == 2 for s in self.shape_pool), \
-                f"shape_pool entries must be (mv, gen) pairs, got {self.shape_pool}"
-            assert (self.height % 16 == 0) and (self.width % 16 == 0), \
-                f"shape_pool requires height/width divisible by 16 (strip pack)"
+            assert all(
+                len(s) == 2 for s in self.shape_pool
+            ), f"shape_pool entries must be (mv, gen) pairs, got {self.shape_pool}"
+            assert (self.height % 16 == 0) and (
+                self.width % 16 == 0
+            ), f"shape_pool requires height/width divisible by 16 (strip pack)"
         self.shape_pool_weights = list(shape_pool_weights) if shape_pool_weights else None
         if self.shape_pool_weights is not None:
-            assert len(self.shape_pool_weights) == len(self.shape_pool), \
-                f"shape_pool_weights length {len(self.shape_pool_weights)} != shape_pool length {len(self.shape_pool)}"
+            assert len(self.shape_pool_weights) == len(
+                self.shape_pool
+            ), f"shape_pool_weights length {len(self.shape_pool_weights)} != shape_pool length {len(self.shape_pool)}"
         self.shape_pool_active = False
 
         self.overfit = overfit
         self.overfit_seq_sample = overfit_seq_sample
 
         if is_node_main():
-            log(f'Creating MultiViewRealDataset from {blue(data_path)}, gen_size={gen_size}, '
-                f'mv_size={mv_size}, dataset_fps={dataset_fps}, model_fps={model_fps}, '
-                f'height={height}, width={width}')
+            log(
+                f"Creating MultiViewRealDataset from {blue(data_path)}, gen_size={gen_size}, "
+                f"mv_size={mv_size}, dataset_fps={dataset_fps}, model_fps={model_fps}, "
+                f"height={height}, width={width}"
+            )
 
         # Load parquet — only read SMALL columns at init (skip the huge `pose` column).
         self.pf = pq.ParquetFile(data_path)
         schema = self.pf.schema_arrow
-        small_cols = [c for c in schema.names if c != 'pose']
+        small_cols = [c for c in schema.names if c != "pose"]
         small_table = self.pf.read(columns=small_cols)
 
         # Schema metadata: accept both plural (correct) and singular (typo in
         # egoexo4d parquet), with [512, 4096] fallback for any prompt_embeds column.
         schema_meta = schema.metadata or {}
-        if b'prompt_embeds_shape' in schema_meta:
-            self.prompt_embeds_shape = json.loads(schema_meta[b'prompt_embeds_shape'])
-        elif b'prompt_embed_shape' in schema_meta:
-            self.prompt_embeds_shape = json.loads(schema_meta[b'prompt_embed_shape'])
-        elif 'prompt_embeds' in schema.names:
+        if b"prompt_embeds_shape" in schema_meta:
+            self.prompt_embeds_shape = json.loads(schema_meta[b"prompt_embeds_shape"])
+        elif b"prompt_embed_shape" in schema_meta:
+            self.prompt_embeds_shape = json.loads(schema_meta[b"prompt_embed_shape"])
+        elif "prompt_embeds" in schema.names:
             self.prompt_embeds_shape = [512, 4096]
 
         full_metadata = small_table.to_pylist()
 
         # Tag each meta with its original parquet row index for pose lookup
         for i, m in enumerate(full_metadata):
-            m['pose_idx'] = i
+            m["pose_idx"] = i
 
         n_total = len(full_metadata)
 
@@ -276,27 +270,32 @@ class MultiViewRealDataset(Dataset):
         # — but if the parquet ends up empty (or below distributed dispatch
         # threshold) we still want a loud warning so the user knows which
         # entry needs attention rather than a cryptic ZeroDivisionError later.
-        threshold = max(1, get_world_size() * int(kwargs.get('num_workers', 1) or 1))
+        threshold = max(1, get_world_size() * int(kwargs.get("num_workers", 1) or 1))
         cls_name = type(self).__name__
-        self.is_empty = (len(self.metadata) == 0)
+        self.is_empty = len(self.metadata) == 0
         if is_node_main():
-            tag = green('OK') if len(self.metadata) >= threshold else red('TOO FEW')
-            log(f'MultiViewRealDataset init: {green(len(self.metadata))} scenes '
-                f'from {blue(data_path)} (parquet rows={n_total}, '
-                f'threshold={threshold}) [{tag}]')
+            tag = green("OK") if len(self.metadata) >= threshold else red("TOO FEW")
+            log(
+                f"MultiViewRealDataset init: {green(len(self.metadata))} scenes "
+                f"from {blue(data_path)} (parquet rows={n_total}, "
+                f"threshold={threshold}) [{tag}]"
+            )
             if len(self.metadata) == 0:
-                log(red(
-                    f'[{cls_name} EMPTY] {data_path}: 0 rows after slice — '
-                    f'this dataset will be DROPPED from co-training (weight=0). '
-                    f'Check the parquet contents and seq_sample/overfit_seq_sample.'
-                ))
+                log(
+                    red(
+                        f"[{cls_name} EMPTY] {data_path}: 0 rows after slice — "
+                        f"this dataset will be DROPPED from co-training (weight=0). "
+                        f"Check the parquet contents and seq_sample/overfit_seq_sample."
+                    )
+                )
             elif len(self.metadata) < threshold:
-                log(red(
-                    f'[{cls_name} BELOW THRESHOLD] {data_path}: '
-                    f'{len(self.metadata)} rows < num_workers*world_size = {threshold}. '
-                    f'Some workers will reuse rows; not fatal but may distort sampling.'
-                ))
-
+                log(
+                    red(
+                        f"[{cls_name} BELOW THRESHOLD] {data_path}: "
+                        f"{len(self.metadata)} rows < num_workers*world_size = {threshold}. "
+                        f"Some workers will reuse rows; not fatal but may distort sampling."
+                    )
+                )
 
     def load_poses(self, pose_indices):
         """Read and parse poses for specific parquet row indices.
@@ -348,9 +347,7 @@ class MultiViewRealDataset(Dataset):
             pf_local = pq.ParquetFile(self.data_path)
             rg_start, rg_end = rg_offsets[rg_idx]
             rg_needed_local = sorted(
-                orig_idx - rg_start
-                for orig_idx in needed
-                if rg_start <= orig_idx < rg_end
+                orig_idx - rg_start for orig_idx in needed if rg_start <= orig_idx < rg_end
             )
             out = {}
             if not rg_needed_local:
@@ -360,16 +357,14 @@ class MultiViewRealDataset(Dataset):
             for batch in pf_local.iter_batches(
                 batch_size=POSE_BATCH_SIZE,
                 row_groups=[rg_idx],
-                columns=['pose', 'num_frames'],
+                columns=["pose", "num_frames"],
             ):
                 n = batch.num_rows
                 batch_end = batch_start + n
-                if cursor < len(rg_needed_local) \
-                        and rg_needed_local[cursor] < batch_end:
-                    pose_col = batch.column('pose')
-                    nf_col = batch.column('num_frames')
-                    while cursor < len(rg_needed_local) \
-                            and rg_needed_local[cursor] < batch_end:
+                if cursor < len(rg_needed_local) and rg_needed_local[cursor] < batch_end:
+                    pose_col = batch.column("pose")
+                    nf_col = batch.column("num_frames")
+                    while cursor < len(rg_needed_local) and rg_needed_local[cursor] < batch_end:
                         local_idx = rg_needed_local[cursor]
                         orig_idx = local_idx + rg_start
                         pose_flat = np.asarray(
@@ -392,7 +387,8 @@ class MultiViewRealDataset(Dataset):
             # num_workers capped (8) to bound concurrent decompress memory and FS
             # contention when many dataloader workers init at once; tune as needed.
             per_rg = parallel_execution(
-                list(target_rgs), action=read_one_rg,
+                list(target_rgs),
+                action=read_one_rg,
                 num_workers=min(8, len(target_rgs)),
                 sequential=len(target_rgs) <= 1,
             )
@@ -404,12 +400,13 @@ class MultiViewRealDataset(Dataset):
         wid = get_worker_info()
         wid = wid.id if wid else 0
         if rank == 0 and wid == 0:
-            log(f'Loaded {green(len(needed))}/{offset} {self.dataset_name} poses '
-                f'({n_rg} row groups, {len(target_rgs)} read) in {dt:.2f}s')
-
+            log(
+                f"Loaded {green(len(needed))}/{offset} {self.dataset_name} poses "
+                f"({n_rg} row groups, {len(target_rgs)} read) in {dt:.2f}s"
+            )
 
     def init_loader(self):
-        if hasattr(self, 'video_paths'):
+        if hasattr(self, "video_paths"):
             return
 
         sharded_metadata = self.shard_meta()
@@ -417,18 +414,20 @@ class MultiViewRealDataset(Dataset):
         self.video_paths = {}
 
         for idx, meta in enumerate(sharded_metadata):
-            base_dir = meta['video_path']
+            base_dir = meta["video_path"]
             if not isabs(base_dir):
                 base_dir = join(self.data_root, base_dir)
             # Per-camera mp4 path; see video_path_template docstring for default.
-            self.video_paths[idx] = [join(base_dir, self.video_path_template.format(c=c)) for c in range(self.NUM_CAMERAS)]
+            self.video_paths[idx] = [
+                join(base_dir, self.video_path_template.format(c=c)) for c in range(self.NUM_CAMERAS)
+            ]
 
-        self.load_poses([m['pose_idx'] for m in sharded_metadata])
+        self.load_poses([m["pose_idx"] for m in sharded_metadata])
 
         rank = get_rank()
         wid = get_worker_info().id if get_worker_info() is not None else 0
         if wid == 0 and rank == 0:
-            log(f'MultiViewRealDataset init_loader: {green(len(sharded_metadata))} scenes')
+            log(f"MultiViewRealDataset init_loader: {green(len(sharded_metadata))} scenes")
 
     def get_cameras(self, idx: int):
         """Get parsed cameras for scene at sharded index. Returns list[NUM_CAMERAS].
@@ -438,7 +437,7 @@ class MultiViewRealDataset(Dataset):
         done here on every access — CPU cost is negligible vs video decode.
         """
         meta = self.sharded_metadata[idx]
-        pose_idx = meta['pose_idx']
+        pose_idx = meta["pose_idx"]
         if pose_idx not in self.camera_params:
             self.load_poses([pose_idx])
         pose_flat, num_frames = self.camera_params[pose_idx]
@@ -465,12 +464,12 @@ class MultiViewRealDataset(Dataset):
             paths = self.video_paths[idx]
             for p in paths:
                 if not isfile(p):
-                    raise FileNotFoundError(f'EgoExo4D video missing: {p}')
+                    raise FileNotFoundError(f"EgoExo4D video missing: {p}")
             self.video_readers[idx] = [self.video_reader_cls(p) for p in paths]
         return self.video_readers[idx]
 
     def shard_meta(self):
-        if hasattr(self, 'sharded_metadata'):
+        if hasattr(self, "sharded_metadata"):
             return self.sharded_metadata
 
         # Empty after slice/filter — keep worker alive (no ZeroDivisionError);
@@ -505,7 +504,7 @@ class MultiViewRealDataset(Dataset):
         # Strided round-robin assignment: this shard owns rows g_id, g_id+
         # g_workers, ... The `g_id % len` start guards the case where there are
         # more shards than rows (start index stays in range; rows get reused).
-        self.sharded_metadata = self.metadata[g_id % len(self.metadata)::g_workers]
+        self.sharded_metadata = self.metadata[g_id % len(self.metadata) :: g_workers]
         self.metadata = self.sharded_metadata
         return self.sharded_metadata
 
@@ -544,24 +543,30 @@ class MultiViewRealDataset(Dataset):
         default_fps = self.dataset_fps if self.dataset_fps else self.model_fps
         total = 0.0
         for m in self.metadata:
-            nf_val = m.get('num_frames', 0)
+            nf_val = m.get("num_frames", 0)
             nf = min(nf_val) if isinstance(nf_val, list) else (nf_val or 0)
-            fps_val = m.get('fps', default_fps)
+            fps_val = m.get("fps", default_fps)
             row_fps = float(min(fps_val) if isinstance(fps_val, list) else fps_val) or default_fps
             total += nf / row_fps
         total = total * self.NUM_CAMERAS * self.model_fps
         return max(1, int(total / tfs / 8))
 
-    def load_view(self, vr: TorchCodecVideoReader, cameras: list,
-                   frame_indices: np.ndarray,
-                   target_h: int, target_w: int,
-                   R0=None, T0=None,
-                   gamma_value: float = 1.0,  # mvgame-style adaptive gamma (sequence-level)
-                   image_aug: bool = False,   # mvgame-style image-space aug (per-view)
-                   frame_start: int = 0,
-                   n_frames_src: int = None,
-                   frames=None,
-                   **aug_kwargs):
+    def load_view(
+        self,
+        vr: TorchCodecVideoReader,
+        cameras: list,
+        frame_indices: np.ndarray,
+        target_h: int,
+        target_w: int,
+        R0=None,
+        T0=None,
+        gamma_value: float = 1.0,  # mvgame-style adaptive gamma (sequence-level)
+        image_aug: bool = False,  # mvgame-style image-space aug (per-view)
+        frame_start: int = 0,
+        n_frames_src: int = None,
+        frames=None,
+        **aug_kwargs,
+    ):
         """Load frames + cameras for the given indices, resize/crop to target.
 
         Identical to StaticDataset.load_view: pre-resize via max-ratio so the
@@ -582,8 +587,9 @@ class MultiViewRealDataset(Dataset):
         """
         resize_ratio = max(target_h / vr.h, target_w / vr.w) if self.pre_resize else 1.0
         if frames is None:  # caller may pass pre-decoded frames (parallel decode)
-            frames = vr.get_batch(frame_indices.tolist(), return_channel_first=True,
-                                  return_tensor=True, ratio=resize_ratio)
+            frames = vr.get_batch(
+                frame_indices.tolist(), return_channel_first=True, return_tensor=True, ratio=resize_ratio
+            )
         frames = frames.float() / 255.0  # F, C, H, W in [0, 1]
 
         # Sequence-level gamma (constant across views) applied BEFORE any geometric aug.
@@ -601,11 +607,13 @@ class MultiViewRealDataset(Dataset):
             cam_indices = (frame_indices - frame_start).astype(np.int64)
         else:
             cam_indices = frame_indices.astype(np.int64)
-        cams = [{k: torch.as_tensor(v, dtype=torch.float32).clone() for k, v in cameras[fi].items()}
-                for fi in cam_indices]
+        cams = [
+            {k: torch.as_tensor(v, dtype=torch.float32).clone() for k, v in cameras[fi].items()}
+            for fi in cam_indices
+        ]
         if resize_ratio != 1.0:
             for cam in cams:
-                cam['K'][:2] *= resize_ratio
+                cam["K"][:2] *= resize_ratio
 
         # Capture pre-augmentation R0/T0 BEFORE video_augmentation applies
         # random roll/scale (otherwise per-view augmentation diff leaks into
@@ -624,12 +632,10 @@ class MultiViewRealDataset(Dataset):
         # multiview.py `random.shuffle(view_to_cam)` upstream randomizes which
         # camera defines the world frame.
         if R0 is None or T0 is None:
-            R0 = cams[0]['R'].clone()
-            T0 = cams[0]['T'].clone()
+            R0 = cams[0]["R"].clone()
+            T0 = cams[0]["T"].clone()
 
-        frames, Ks, Rs, Ts = video_augmentation(
-            frames, cams, Ho=target_h, Wo=target_w, **aug_kwargs
-        )
+        frames, Ks, Rs, Ts = video_augmentation(frames, cams, Ho=target_h, Wo=target_w, **aug_kwargs)
 
         if image_aug:
             frames = image_augmentation(frames)
@@ -658,25 +664,25 @@ class MultiViewRealDataset(Dataset):
         projs_inv = RTs_inv @ Ks_inv
 
         return {
-            'frames': frames,
-            'projs': projs,
-            'projs_inv': projs_inv,
-            'Ks': Ks,
+            "frames": frames,
+            "projs": projs,
+            "projs_inv": projs_inv,
+            "Ks": Ks,
             # World-locked w2c Rs/Ts in the same frame as projs. The trainer derives
             # canonical c2w pose_10d (R_c2w, camera center C) from these values.
-            'Rs': Rs_new,
-            'Ts': Ts_new,
-            'R0': R0,
-            'T0': T0,
+            "Rs": Rs_new,
+            "Ts": Ts_new,
+            "R0": R0,
+            "T0": T0,
         }
 
     def getitem_impl(self, idx: int, **kwargs):
         self.init_loader()
         if not self.sharded_metadata:
             raise RuntimeError(
-                f'{type(self).__name__} has no usable samples — should never '
-                f'be picked by DatasetAggregator (weight=0). '
-                f'Check data_path={self.data_path}'
+                f"{type(self).__name__} has no usable samples — should never "
+                f"be picked by DatasetAggregator (weight=0). "
+                f"Check data_path={self.data_path}"
             )
         shape_attempt = 0
         while True:
@@ -687,14 +693,14 @@ class MultiViewRealDataset(Dataset):
             # start, view shuffle, aug params) deterministic per idx — required
             # so all SP ranks that share an idx produce identical batches.
             seed = idx // len(self.sharded_metadata)
-            seed = seed % (2 ** 32 - 1)  # clamp into the valid numpy/torch seed range
+            seed = seed % (2**32 - 1)  # clamp into the valid numpy/torch seed range
             set_seed(seed)
             local_idx = idx % len(self.sharded_metadata)
 
             meta = self.sharded_metadata[local_idx]
 
             # Fast length check from parquet metadata — no video I/O.
-            nf_meta = meta.get('num_frames', 0)
+            nf_meta = meta.get("num_frames", 0)
             if isinstance(nf_meta, list):
                 n_frames_src = min(nf_meta) if nf_meta else 0
             else:
@@ -704,11 +710,10 @@ class MultiViewRealDataset(Dataset):
             # slowest cam). resolve_fps_remap snaps it to a clean stride pattern;
             # max(1.0, ...) forbids upsampling (ratio<1 would duplicate frames),
             # so for sources slower than the model rate we just consume natively.
-            fps_val = meta.get('fps', self.dataset_fps or self.model_fps)
+            fps_val = meta.get("fps", self.dataset_fps or self.model_fps)
             row_src_fps = float(min(fps_val) if isinstance(fps_val, list) else fps_val)
             row_eff_model, row_eff_src = resolve_fps_remap(self.model_fps, row_src_fps)
-            row_fps_ratio = max(1.0, float(row_eff_src) / float(row_eff_model)) \
-                if row_eff_src else 1.0
+            row_fps_ratio = max(1.0, float(row_eff_src) / float(row_eff_model)) if row_eff_src else 1.0
             n_frames = int(n_frames_src / row_fps_ratio)  # usable length in model-fps frames
 
             total_latent_size = self.gen_size
@@ -734,11 +739,13 @@ class MultiViewRealDataset(Dataset):
             if self.shape_pool:
                 shape_attempt += 1
                 self.maybe_pick_shape(idx, attempt=shape_attempt)
-            log(yellow(
-                f"MultiViewRealDataset: scene {meta['video_path']} too short "
-                f"({n_frames}<{total_frame_size}, mv={old_mv}, gen={old_gen}): "
-                f"re-pick → (mv={self.mv_size}, gen={self.gen_size})"
-            ))
+            log(
+                yellow(
+                    f"MultiViewRealDataset: scene {meta['video_path']} too short "
+                    f"({n_frames}<{total_frame_size}, mv={old_mv}, gen={old_gen}): "
+                    f"re-pick → (mv={self.mv_size}, gen={self.gen_size})"
+                )
+            )
             idx = local_idx + 1
 
         # Now load actual video readers + cameras for the selected row.
@@ -753,23 +760,29 @@ class MultiViewRealDataset(Dataset):
         # silently truncate to the sliced cam's length and the windowed-detect
         # in load_view (line ~522) may misclassify per-cam. Currently no such
         # cohort exists in production parquets.
-        n_frames_src = min(min(len(vrs[c]), len(cams_per_view[c]))
-                           for c in range(self.NUM_CAMERAS))
+        n_frames_src = min(min(len(vrs[c]), len(cams_per_view[c])) for c in range(self.NUM_CAMERAS))
         n_frames = int(n_frames_src / row_fps_ratio)
 
         # Augmentation flags (same as StaticDataset)
         disable_aug = random.random() < self.disable_augmentation_ratio or self.overfit
         if disable_aug:
-            aug_kwargs = dict(s_min=1.0, s_max=1.0, cx_min=0.0, cx_max=0.0,
-                              cy_min=0.0, cy_max=0.0, r_min=0.0, r_max=0.0)
+            aug_kwargs = dict(
+                s_min=1.0, s_max=1.0, cx_min=0.0, cx_max=0.0, cy_min=0.0, cy_max=0.0, r_min=0.0, r_max=0.0
+            )
         else:
-            aug_kwargs = dict(s_min=0.65, s_max=1.25,
-                              cx_min=-0.1, cx_max=0.1,
-                              cy_min=-0.1, cy_max=0.1,
-                              r_min=-15.0, r_max=15.0)
+            aug_kwargs = dict(
+                s_min=0.65,
+                s_max=1.25,
+                cx_min=-0.1,
+                cx_max=0.1,
+                cy_min=-0.1,
+                cy_max=0.1,
+                r_min=-15.0,
+                r_max=15.0,
+            )
         aug_kwargs.update(kwargs)
         if self.max_fov_h_deg is not None:
-            aug_kwargs['max_fov_h_deg'] = self.max_fov_h_deg
+            aug_kwargs["max_fov_h_deg"] = self.max_fov_h_deg
 
         # Sample one temporal window in MODEL fps space, then remap to source
         # indices. Mirrors mvgame.py:915-916, 958-959.
@@ -783,8 +796,7 @@ class MultiViewRealDataset(Dataset):
             # n_frames_src-1: the last window step can round past the final
             # decodable frame (n_frames is the floor of n_frames_src/ratio, so
             # model_idx.max()*ratio may exceed n_frames_src-1 by <1 frame).
-            src_idx = np.minimum(np.round(model_idx * row_fps_ratio).astype(np.int64),
-                                 n_frames_src - 1)
+            src_idx = np.minimum(np.round(model_idx * row_fps_ratio).astype(np.int64), n_frames_src - 1)
         else:
             src_idx = model_idx.astype(np.int64)
 
@@ -794,7 +806,7 @@ class MultiViewRealDataset(Dataset):
         # load_view subtracts it back for cameras lookup when n_frames_src
         # matches len(cameras) (auto-detect). frame_start=0 rows (egoexo4d,
         # waymo) pass through unchanged.
-        frame_start = int(meta.get('frame_start') or 0)
+        frame_start = int(meta.get("frame_start") or 0)
         src_idx_abs = src_idx + frame_start
 
         # Random camera-to-view shuffle so the model sees each physical camera
@@ -806,49 +818,48 @@ class MultiViewRealDataset(Dataset):
 
         # Build batch. gather_mixed_batch tolerates per-dataset schema
         # differences (see utils/distributed.py / DatasetAggregator docs).
-        batch = {'cpu': {}}
-        batch['mv'] = mv
-        batch['cpu']['seed'] = int(seed)
-        batch['cpu']['prompts'] = meta['caption']
-        batch['cpu']['video_path'] = meta['video_path']
-        batch['cpu']['dataset_name'] = self.dataset_name
-        batch['cpu']['parquet'] = basename(self.data_path)
+        batch = {"cpu": {}}
+        batch["mv"] = mv
+        batch["cpu"]["seed"] = int(seed)
+        batch["cpu"]["prompts"] = meta["caption"]
+        batch["cpu"]["video_path"] = meta["video_path"]
+        batch["cpu"]["dataset_name"] = self.dataset_name
+        batch["cpu"]["parquet"] = basename(self.data_path)
         # Reproduction info: shared time window + per-view camera selection.
         # All views share the same source frame indices; they differ only in
         # which physical camera they read from (view_to_cam is a shuffle of
         # range(NUM_CAMERAS)). Together with video_path + seed these replay
         # the exact sample.
-        batch['cpu']['start_frame'] = int(start_model)
+        batch["cpu"]["start_frame"] = int(start_model)
         # Row + source-frame span for the vis meta panel (parity with
         # static/mvgame/dynamic). src_idx_abs is the absolute source frame indices
         # actually read (start_model remapped to source fps + frame_start); all
         # views share this one window, so a single (row, start, end) applies.
-        batch['cpu']['rows'] = np.asarray([int(meta.get('pose_idx', -1))], dtype=np.int64)
-        batch['cpu']['start_frames'] = np.asarray([int(src_idx_abs.min())], dtype=np.int64)
-        batch['cpu']['end_frames'] = np.asarray([int(src_idx_abs.max())], dtype=np.int64)
-        batch['cpu']['view_to_cam'] = np.asarray(view_to_cam, dtype=np.int64)  # (NUM_CAMERAS,)
-        batch['cpu']['fps_ratio'] = float(row_fps_ratio)
-        batch['cpu']['aug_kwargs'] = dict(aug_kwargs)
+        batch["cpu"]["rows"] = np.asarray([int(meta.get("pose_idx", -1))], dtype=np.int64)
+        batch["cpu"]["start_frames"] = np.asarray([int(src_idx_abs.min())], dtype=np.int64)
+        batch["cpu"]["end_frames"] = np.asarray([int(src_idx_abs.max())], dtype=np.int64)
+        batch["cpu"]["view_to_cam"] = np.asarray(view_to_cam, dtype=np.int64)  # (NUM_CAMERAS,)
+        batch["cpu"]["fps_ratio"] = float(row_fps_ratio)
+        batch["cpu"]["aug_kwargs"] = dict(aug_kwargs)
         if row_fps_ratio == 1.0:
-            batch['fps'] = int(row_src_fps)
+            batch["fps"] = int(row_src_fps)
         else:
-            batch['fps'] = row_eff_model
+            batch["fps"] = row_eff_model
 
         # Prompt embeddings — must be cached, otherwise rank divergence
         # H3 re-encodes the raw caption with Qwen3; Wan/T5 caches are incompatible.
         embed = torch.empty((0, 5120), dtype=torch.bfloat16)
-        batch['prompt_embeds'] = embed
-
+        batch["prompt_embeds"] = embed
 
         # Pack layout fields (see pack_factory / make_strip_pack):
         #   pack_size [sh, sw]: scales base (height, width) to the full canvas.
         #   rs[v]:  per-view resolution scale relative to base h/w.
         #   xs[v], ys[v]: top-left of view v's tile as a FRACTION of base
         #                 (width, height); multiplied by self.width/height below.
-        pack_size = self.pack['pack_size']
-        ratios = self.pack['rs']
-        xs = self.pack['xs']
-        ys = self.pack['ys']
+        pack_size = self.pack["pack_size"]
+        ratios = self.pack["rs"]
+        xs = self.pack["xs"]
+        ys = self.pack["ys"]
 
         height_pack = int(self.height * pack_size[0])
         width_pack = int(self.width * pack_size[1])
@@ -868,8 +879,9 @@ class MultiViewRealDataset(Dataset):
         if self.gamma_correction:  # mvgame_raw: aggressive lift (default MVGAME_LIFT_BAND)
             gamma_value = compute_sequence_gamma(vrs, src_idx_abs, mv, self.NUM_CAMERAS)
         elif self.exposure_clamp:  # real data: loose two-sided clamp
-            gamma_value = compute_sequence_gamma(vrs, src_idx_abs, mv, self.NUM_CAMERAS,
-                                                 band=LOOSE_EXPOSURE_BAND)
+            gamma_value = compute_sequence_gamma(
+                vrs, src_idx_abs, mv, self.NUM_CAMERAS, band=LOOSE_EXPOSURE_BAND
+            )
         # image_aug is per-view but gated by the same disable_aug switch as video_aug.
         view_image_aug = self.image_aug and not disable_aug
 
@@ -885,8 +897,11 @@ class MultiViewRealDataset(Dataset):
         # bound concurrent decode memory; else fall back to per-view decode.
         view_specs = []  # (cam_idx, resize_ratio) per realized view, in loop order
         for _ci, _r, _xo, _yo in zip(view_to_cam, ratios, xs, ys):
-            _rr = (max(int(self.height * _r) / vrs[_ci].h, int(self.width * _r) / vrs[_ci].w)
-                   if self.pre_resize else 1.0)
+            _rr = (
+                max(int(self.height * _r) / vrs[_ci].h, int(self.width * _r) / vrs[_ci].w)
+                if self.pre_resize
+                else 1.0
+            )
             view_specs.append((_ci, _rr))
         decoded_per_view = None
         _cams = [c for c, _ in view_specs]
@@ -898,75 +913,79 @@ class MultiViewRealDataset(Dataset):
         # baseline and is intentionally NOT gated here.
         if self.parallel_view_decode and len(set(_cams)) == len(_cams):
             _inds = src_idx_abs.tolist()
-            def _decode_view(i):
-                c, rr = view_specs[i]
-                return vrs[c].get_batch(_inds, return_channel_first=True,
-                                        return_tensor=True, ratio=rr)
-            decoded_per_view = parallel_execution(
-                list(range(len(view_specs))), action=_decode_view,
-                num_workers=min(8, len(view_specs)))
 
-        for view_idx, (cam_idx, ratio, x_off, y_off) in enumerate(
-                zip(view_to_cam, ratios, xs, ys)):
+            def decode_view(i):
+                c, rr = view_specs[i]
+                return vrs[c].get_batch(_inds, return_channel_first=True, return_tensor=True, ratio=rr)
+
+            decoded_per_view = parallel_execution(
+                list(range(len(view_specs))), action=decode_view, num_workers=min(8, len(view_specs))
+            )
+
+        for view_idx, (cam_idx, ratio, x_off, y_off) in enumerate(zip(view_to_cam, ratios, xs, ys)):
             target_h = int(self.height * ratio)
             target_w = int(self.width * ratio)
 
             view_data = self.load_view(
-                vrs[cam_idx], cams_per_view[cam_idx], src_idx_abs,
-                target_h, target_w,
-                R0=R0, T0=T0,
+                vrs[cam_idx],
+                cams_per_view[cam_idx],
+                src_idx_abs,
+                target_h,
+                target_w,
+                R0=R0,
+                T0=T0,
                 gamma_value=gamma_value,
                 image_aug=view_image_aug,
                 frame_start=frame_start,
                 n_frames_src=n_frames_src,
                 frames=(decoded_per_view[view_idx] if decoded_per_view is not None else None),
-                **aug_kwargs
+                **aug_kwargs,
             )
 
             if R0 is None:
-                R0 = view_data['R0']
-                T0 = view_data['T0']
+                R0 = view_data["R0"]
+                T0 = view_data["T0"]
 
-            h, w = view_data['frames'].shape[-2:]
+            h, w = view_data["frames"].shape[-2:]
             px = int(x_off * self.width)
             py = int(y_off * self.height)
-            frames[:, :, py:py + h, px:px + w] = view_data['frames']
+            frames[:, :, py : py + h, px : px + w] = view_data["frames"]
 
-            projs_list.append(view_data['projs'])
-            projs_inv_list.append(view_data['projs_inv'])
-            Ks_list.append(view_data['Ks'])
-            Rs_list.append(view_data['Rs'])
-            Ts_list.append(view_data['Ts'])
+            projs_list.append(view_data["projs"])
+            projs_inv_list.append(view_data["projs_inv"])
+            Ks_list.append(view_data["Ks"])
+            Rs_list.append(view_data["Rs"])
+            Ts_list.append(view_data["Ts"])
 
-        batch['frames'] = frames
+        batch["frames"] = frames
         # Each *_list[v] is per-view [F, ...]. stack(dim=1) → [F, V, ...], then
         # reshape(-1, ...) flattens to FRAME-MAJOR order [f0v0, f0v1, ..., f1v0,
         # ...] (all views of frame 0, then frame 1). Downstream PRoPE/packing
         # relies on this view-within-frame interleave.
-        batch['projs'] = torch.stack(projs_list, dim=1).reshape(-1, 4, 4)
-        batch['projs_inv'] = torch.stack(projs_inv_list, dim=1).reshape(-1, 4, 4)
-        batch['Ks'] = torch.stack(Ks_list, dim=1).reshape(-1, 3, 3)
-        batch['Rs'] = torch.stack(Rs_list, dim=1).reshape(-1, 3, 3)
-        batch['Ts'] = torch.stack(Ts_list, dim=1).reshape(-1, 3, 1)
+        batch["projs"] = torch.stack(projs_list, dim=1).reshape(-1, 4, 4)
+        batch["projs_inv"] = torch.stack(projs_inv_list, dim=1).reshape(-1, 4, 4)
+        batch["Ks"] = torch.stack(Ks_list, dim=1).reshape(-1, 3, 3)
+        batch["Rs"] = torch.stack(Rs_list, dim=1).reshape(-1, 3, 3)
+        batch["Ts"] = torch.stack(Ts_list, dim=1).reshape(-1, 3, 1)
 
         # Adaptive pose stable factor sized by MAX PAIRWISE camera distance (window
         # diameter), not mean. Rs/Ts are w2c so center C = -R^T @ T; the far end
         # overflows bf16 PRoPE. batch['Rs']/['Ts'] are now WORLD-LOCKED (v0/f0),
         # consistent with projs + pose_10d; pairwise is translation-invariant.
-        centers = -torch.bmm(batch['Rs'].mT, batch['Ts']).squeeze(-1)  # world-locked
+        centers = -torch.bmm(batch["Rs"].mT, batch["Ts"]).squeeze(-1)  # world-locked
         pose_stable_factor, pose_max_t = select_pose_stable_factor(centers, self.pose_stable_factors)
         if pose_stable_factor != 1.0:
             # Scale BOTH projection translations and w2c T. The trainer derives
             # pose_10d camera center C=-R^T T, so both PRoPE streams see the same scale.
-            batch['projs'][:, :3, 3] /= pose_stable_factor
-            batch['projs_inv'][:, :3, 3] /= pose_stable_factor
-            batch['Ts'] /= pose_stable_factor
+            batch["projs"][:, :3, 3] /= pose_stable_factor
+            batch["projs_inv"][:, :3, 3] /= pose_stable_factor
+            batch["Ts"] /= pose_stable_factor
 
-        batch['cpu']['pack'] = self.pack
-        batch['cpu']['pack']['width'] = self.width
-        batch['cpu']['pack']['height'] = self.height
-        batch['cpu']['pose_stable_factor'] = pose_stable_factor
-        batch['cpu']['pose_max_t'] = pose_max_t  # pre-division max pairwise dist (bf16 diagnostic)
+        batch["cpu"]["pack"] = self.pack
+        batch["cpu"]["pack"]["width"] = self.width
+        batch["cpu"]["pack"]["height"] = self.height
+        batch["cpu"]["pose_stable_factor"] = pose_stable_factor
+        batch["cpu"]["pose_max_t"] = pose_max_t  # pre-division max pairwise dist (bf16 diagnostic)
 
         return batch
 
@@ -985,22 +1004,20 @@ class MultiViewRealDataset(Dataset):
         if not self.shape_pool:
             self.shape_pool_active = False
             return None
-        seed_str = f'shape_pool_{idx}' if attempt == 0 else f'shape_pool_{idx}_attempt_{attempt}'
+        seed_str = f"shape_pool_{idx}" if attempt == 0 else f"shape_pool_{idx}_attempt_{attempt}"
         rng = random.Random(seed_str)
         weights = self.shape_pool_weights or [1.0] * len(self.shape_pool)
         mv_p, gen_p = rng.choices(self.shape_pool, weights=weights, k=1)[0]
         if int(mv_p) > self.NUM_CAMERAS:
-            valid = [(s, w) for s, w in zip(self.shape_pool, weights)
-                     if s[0] <= self.NUM_CAMERAS]
+            valid = [(s, w) for s, w in zip(self.shape_pool, weights) if s[0] <= self.NUM_CAMERAS]
             if not valid:
                 # No pool entry fits this dataset's camera budget; fall back to
                 # the legacy cap so we still produce a sample rather than raise.
                 self.mv_size = self.NUM_CAMERAS
                 self.gen_size = int(gen_p)
             else:
-                rng2 = random.Random(f'shape_pool_redirect_{idx}')
-                mv_p, gen_p = rng2.choices([s for s, _ in valid],
-                                           weights=[w for _, w in valid], k=1)[0]
+                rng2 = random.Random(f"shape_pool_redirect_{idx}")
+                mv_p, gen_p = rng2.choices([s for s, _ in valid], weights=[w for _, w in valid], k=1)[0]
                 self.mv_size = int(mv_p)
                 self.gen_size = int(gen_p)
         else:
@@ -1016,9 +1033,11 @@ class MultiViewRealDataset(Dataset):
             return self.getitem_impl(idx)
         except Exception as e:
             wi = get_worker_info()
-            log(red(
-                f"[MultiViewRealDataset __getitem__] failed: rank={get_rank()} "
-                f"worker={wi.id if wi is not None else 0} idx={idx} err={e}"
-            ))
+            log(
+                red(
+                    f"[MultiViewRealDataset __getitem__] failed: rank={get_rank()} "
+                    f"worker={wi.id if wi is not None else 0} idx={idx} err={e}"
+                )
+            )
             stacktrace()
             raise

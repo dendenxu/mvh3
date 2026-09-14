@@ -46,6 +46,9 @@ class SequencePacker:
 
     Each buffer has one entry per segment and is concatenated in finish().
     Records map predicted video tokens back to their view and latent frames.
+    The model receives [text | image condition + video | inactive padding].
+    `kind`, `chunk`, and `scope` describe token visibility; `camera_ids` indexes
+    a separate pose table so spatial tokens can share a frame's camera.
     """
 
     def __init__(self, document, cfg, device):
@@ -97,18 +100,34 @@ class SequencePacker:
                 self.text.append(embedding)
                 tags = view.get("text_tag_specs", {}).get(chunk, view.get("text_tags"))
                 self.text_tags.append(
-                    torch.ones(token_count, device=device, dtype=torch.long) if tags is None else tags.to(device))
-                self.text_kinds.append(torch.full((token_count, ), CONDITION, device=device, dtype=torch.long))
+                    torch.ones(token_count, device=device, dtype=torch.long)
+                    if tags is None
+                    else tags.to(device)
+                )
+                self.text_kinds.append(torch.full((token_count,), CONDITION, device=device, dtype=torch.long))
                 self.text_scopes.append(
-                    torch.full((token_count, ), -1 if shared_text else view_index, device=device, dtype=torch.long))
-                self.text_chunks.append(torch.full((token_count, ), generation_chunk, device=device, dtype=torch.long))
-                past_cached = (single_sequence and inference is not None and inference.get("cached", False)
-                               and 0 <= generation_chunk < inference["chunk"])
-                self.text_active.append(torch.full((token_count, ), not past_cached, device=device, dtype=torch.bool))
+                    torch.full(
+                        (token_count,), -1 if shared_text else view_index, device=device, dtype=torch.long
+                    )
+                )
+                self.text_chunks.append(
+                    torch.full((token_count,), generation_chunk, device=device, dtype=torch.long)
+                )
+                past_cached = (
+                    single_sequence
+                    and inference is not None
+                    and inference.get("cached", False)
+                    and 0 <= generation_chunk < inference["chunk"]
+                )
+                self.text_active.append(
+                    torch.full((token_count,), not past_cached, device=device, dtype=torch.bool)
+                )
                 position = torch.zeros((token_count, 3), device=device, dtype=torch.float64)
                 position[:, 0] = torch.arange(token_count, device=device)
                 self.text_positions.append(position)
-                text_sigma = view_sigmas[view_index][max(0, min(generation_chunk, chunk_counts[view_index] - 1))]
+                text_sigma = view_sigmas[view_index][
+                    max(0, min(generation_chunk, chunk_counts[view_index] - 1))
+                ]
                 if single_sequence:
                     cut = view["clean_prefix_chunks"] if inference is None else inference["chunk"]
                     if generation_chunk < cut:
@@ -116,8 +135,9 @@ class SequencePacker:
                 self.text_sigmas.append(text_sigma.expand(token_count))
         self.text_count = sum(t.shape[1] for t in self.text)
 
-    def add_video(self, view, view_index, latent, selected, kind, noise_level, target=None, weight=None,
-                  geometry=None):
+    def add_video(
+        self, view, view_index, latent, selected, kind, noise_level, target=None, weight=None, geometry=None
+    ):
         """Append one image/history/target segment, retaining decoder support."""
         document, cfg, device = self.document, self.cfg, self.device
         source = view if geometry is None else geometry
@@ -136,14 +156,19 @@ class SequencePacker:
         if self.separate_references:
             # Independent videos must not inherit another video's camera gauge.
             self.reference_poses.append(view["pose"][:1].to(device).expand(frame_count, -1))
-            for key, destination in (("projection", self.reference_projections), ("inverse", self.reference_inverses)):
+            for key, destination in (
+                ("projection", self.reference_projections),
+                ("inverse", self.reference_inverses),
+            ):
                 reference = view[key][0].to(device)
                 if reference.ndim == 3:
                     reference = reference[:1]
                 destination.append(reference[None].expand(frame_count, *reference.shape))
         self.camera_ids.append(
-            torch.arange(self.pose_offset, self.pose_offset + frame_count,
-                         device=device).repeat_interleave(h * w // 4))
+            torch.arange(self.pose_offset, self.pose_offset + frame_count, device=device).repeat_interleave(
+                h * w // 4
+            )
+        )
         self.pose_offset += frame_count
         token_chunk = view_chunk_ids(source, cfg.chunk_size, device)[selected].repeat_interleave(h * w // 4)
         frame_kind = torch.as_tensor(kind, device=device).expand(len(source["frames"]))[selected]
@@ -163,16 +188,25 @@ class SequencePacker:
         self.positions.append(torch.cat((times[:, None], spatial), -1))
         level = torch.as_tensor(noise_level, device=device).expand(len(source["frames"]))[selected]
         self.token_sigmas.append(level.repeat_interleave(h * w // 4))
-        self.scales.append(torch.full((token_count, ), math.log(view["scale"]), device=device))
+        self.scales.append(torch.full((token_count,), math.log(view["scale"]), device=device))
         self.targets.append(torch.zeros_like(tokens) if target is None else patchify(target[:, :, selected]))
         if weight is None:
             self.loss_weights.append(torch.zeros(token_count, device=device))
         else:
             self.loss_weights.append(
-                (weight[selected, None, None] * valid * view["spatial_weights"].to(device)[None]).flatten())
+                (weight[selected, None, None] * valid * view["spatial_weights"].to(device)[None]).flatten()
+            )
             self.records.append(
-                dict(view=view_index, start=self.video_offset, stop=self.video_offset + token_count,
-                     selected=frame_indices, shape=latent.shape, noisy=latent.detach(), sigmas=level))
+                dict(
+                    view=view_index,
+                    start=self.video_offset,
+                    stop=self.video_offset + token_count,
+                    selected=frame_indices,
+                    shape=latent.shape,
+                    noisy=latent.detach(),
+                    sigmas=level,
+                )
+            )
         self.video_offset += token_count
 
     def finish(self, history_dropout, inference=None):
@@ -193,19 +227,21 @@ class SequencePacker:
         chunk = torch.cat((*self.text_chunks, *self.chunks))
         scope = torch.cat((*self.text_scopes, *self.scopes))
         enabled = torch.cat((*self.text_active, *self.active))
-        ids = torch.cat((torch.full((self.text_count, ), -1, device=device, dtype=torch.long), *self.camera_ids))
+        ids = torch.cat(
+            (torch.full((self.text_count,), -1, device=device, dtype=torch.long), *self.camera_ids)
+        )
         pos = torch.cat((*self.text_positions, *self.positions))
         sigma = torch.cat((*self.text_sigmas, *self.token_sigmas))
         scale = torch.cat((torch.zeros(self.text_count, device=device), *self.scales))
         if pad:
             # Empty audio rows give SP a divisible sequence without inventing
             # video/camera observations. They are isolated in attention and loss.
-            tags = torch.cat((tags, torch.full((pad, ), 2, device=device, dtype=torch.long)))
+            tags = torch.cat((tags, torch.full((pad,), 2, device=device, dtype=torch.long)))
             kind = torch.cat((kind, torch.zeros(pad, device=device, dtype=torch.long)))
-            chunk = torch.cat((chunk, torch.full((pad, ), -1, device=device, dtype=torch.long)))
-            scope = torch.cat((scope, torch.full((pad, ), -1, device=device, dtype=torch.long)))
+            chunk = torch.cat((chunk, torch.full((pad,), -1, device=device, dtype=torch.long)))
+            scope = torch.cat((scope, torch.full((pad,), -1, device=device, dtype=torch.long)))
             enabled = torch.cat((enabled, torch.zeros(pad, device=device, dtype=torch.bool)))
-            ids = torch.cat((ids, torch.full((pad, ), -1, device=device, dtype=torch.long)))
+            ids = torch.cat((ids, torch.full((pad,), -1, device=device, dtype=torch.long)))
             pos = torch.cat((pos, torch.zeros((pad, 3), device=device)))
             sigma = torch.cat((sigma, torch.zeros(pad, device=device)))
             scale = torch.cat((scale, torch.zeros(pad, device=device)))
@@ -215,30 +251,51 @@ class SequencePacker:
         table = pad_rows(table, 0, buckets.get("timesteps", 0), repeat=True)
         for dimension in (0, 1):
             history_dropout = pad_rows(history_dropout, dimension, buckets.get("chunks", 0))
-        layout = TokenLayout(kind, chunk, scope, not document["isolated"], enabled, history_dropout,
-                             single_sequence=single_sequence)
+        layout = TokenLayout(
+            kind,
+            chunk,
+            scope,
+            not document["isolated"],
+            enabled,
+            history_dropout,
+            single_sequence=single_sequence,
+        )
         inputs = dict(
-            hidden_states=media, audio_hidden_states=media.new_zeros(
-                (1, pad, 32)), encoder_hidden_states=torch.cat(self.text,
-                                                               1), timestep=1 - table[:, 0], timestep_indices=time_ids,
-            token_tags=tags, position_ids=pos, video_indices=torch.arange(self.text_count, length, device=device),
+            hidden_states=media,
+            audio_hidden_states=media.new_zeros((1, pad, 32)),
+            encoder_hidden_states=torch.cat(self.text, 1),
+            timestep=1 - table[:, 0],
+            timestep_indices=time_ids,
+            token_tags=tags,
+            position_ids=pos,
+            video_indices=torch.arange(self.text_count, length, device=device),
             audio_indices=torch.arange(length, length + pad, device=device),
-            text_indices=torch.arange(self.text_count, device=device), camera_pose=torch.cat(self.poses)[None],
-            camera_indices=ids, camera_projections=(torch.cat(self.projections)[None],
-                                                    torch.cat(self.inverses)[None]), attention_mask=layout,
-            scale_log=table[:, 1] if cfg.model.scale_cond and cfg.h3.scale_conditioning == "spatial_rotary" else None)
+            text_indices=torch.arange(self.text_count, device=device),
+            camera_pose=torch.cat(self.poses)[None],
+            camera_indices=ids,
+            camera_projections=(torch.cat(self.projections)[None], torch.cat(self.inverses)[None]),
+            attention_mask=layout,
+            scale_log=(
+                table[:, 1]
+                if cfg.model.scale_cond and cfg.h3.scale_conditioning == "spatial_rotary"
+                else None
+            ),
+        )
         if single_sequence and inference is not None and inference.get("cached", False):
             # The refiner recomputes caption prefixes, while main attention
             # reads their stored clean KV exactly once from the history cache.
             refiner = replace(layout, active=None)
             indices = inputs["text_indices"]
-            inputs["text_attention_mask"] = (refiner.dense(indices)
-                                             if self.text_count <= 4096 else refiner.block_mask(indices))
+            inputs["text_attention_mask"] = (
+                refiner.dense(indices) if self.text_count <= 4096 else refiner.block_mask(indices)
+            )
         if not cfg.model.prope_unwrapped:
             if self.separate_references:
                 inputs["camera_reference"] = torch.cat(self.reference_poses)[None]
-                inputs["camera_projection_reference"] = (torch.cat(self.reference_projections)[None],
-                                                         torch.cat(self.reference_inverses)[None])
+                inputs["camera_projection_reference"] = (
+                    torch.cat(self.reference_projections)[None],
+                    torch.cat(self.reference_inverses)[None],
+                )
             else:
                 reference = views[0]
                 inputs["camera_reference"] = reference["pose"][:1].to(device)[None]

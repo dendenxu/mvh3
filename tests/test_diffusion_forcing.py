@@ -4,16 +4,16 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
 from fixtures_h3 import feature_document, tiny_model
-from test_worldviews import recipe, dense_inputs
+from test_worldviews import dense_inputs, recipe
+
 from h3.modules.grouped_attention import visibility_groups
 from h3.modules.kv_cache import HistoryCache
 from h3.modules.masking import CLEAN, CONDITION, NOISY, TokenLayout
 from model.chunks import prepare_chunk_plan, prepare_clean_prefix
-from model.diffusion import WorldViewsObjective
+from model.diffusion import DiffusionObjective
 from utils.captions import caption_specs
-from utils.checkpoint import save_checkpoint, load_checkpoint
+from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.config import validate_config
 
 
@@ -21,11 +21,11 @@ def df_recipe():
     cfg = recipe()
     cfg.h3.single_sequence = True
     cfg.h3.chunk_size_range = [3, 20]
-    cfg.h3.clean_prefix_probability = 1.
-    cfg.h3.caption_overlap_threshold = .5
-    cfg.context_noise = cfg.context_noise_std = cfg.inference_context_noise = 0.
-    cfg.history_dropout_ratio = 0.
-    cfg.h3.condition_noise = 0.
+    cfg.h3.clean_prefix_probability = 1.0
+    cfg.h3.caption_overlap_threshold = 0.5
+    cfg.context_noise = cfg.context_noise_std = cfg.inference_context_noise = 0.0
+    cfg.history_dropout_ratio = 0.0
+    cfg.h3.condition_noise = 0.0
     cfg.resampling_forcing_clean_chunks = 0
     return cfg
 
@@ -55,15 +55,19 @@ def test_random_sizes_are_final_before_the_clean_cut(frames):
         assert 0 <= view["clean_prefix_chunks"] < len(sizes)
         assert chunks[~view["valid"]].eq(chunks[view["valid"]][-1]).all()
         state = torch.get_rng_state()
-        assert WorldViewsObjective(cfg).prepare_document(document, "cpu") is document
+        assert DiffusionObjective(cfg).prepare_document(document, "cpu") is document
         assert torch.equal(state, torch.get_rng_state())
 
 
 def test_single_video_copy_clean_prefix_and_per_chunk_noise():
     cfg, doc = df_recipe(), planned_document(2)
     doc["isolated"] = True
-    objective = WorldViewsObjective(cfg)
-    objective.sample_sigmas = lambda count, device: (torch.arange(1, count + 1) / (count + 1), torch.ones(count), False)
+    objective = DiffusionObjective(cfg)
+    objective.sample_sigmas = lambda count, device: (
+        torch.arange(1, count + 1) / (count + 1),
+        torch.ones(count),
+        False,
+    )
     inputs, targets, weights, records, _ = objective.pack(doc, "cpu")
     layout = inputs["attention_mask"]
     assert inputs["hidden_states"].shape[1] == sum(v["latent"].shape[2] for v in doc["views"])
@@ -72,11 +76,11 @@ def test_single_video_copy_clean_prefix_and_per_chunk_noise():
         clean = view["generation_chunks"] < view["clean_prefix_chunks"]
         assert torch.equal(record["noisy"][:, :, clean], view["latent"][:, :, clean])
         assert record["sigmas"][clean].eq(0).all()
-        selected_weights = weights[record["start"]:record["stop"]]
+        selected_weights = weights[record["start"] : record["stop"]]
         assert selected_weights[clean].eq(0).all() and selected_weights[~clean].gt(0).all()
         assert record["sigmas"][~clean].unique().numel() == 3
         assert selected_weights[~view["valid"]].gt(0).all()
-        token_ids = inputs["video_indices"][record["start"]:record["stop"]]
+        token_ids = inputs["video_indices"][record["start"] : record["stop"]]
         assert layout.kind[token_ids][clean].eq(CLEAN).all()
         assert layout.kind[token_ids][~clean].eq(NOISY).all()
     assert not torch.equal(records[0]["sigmas"], records[1]["sigmas"])
@@ -99,7 +103,7 @@ def test_joint_variable_lengths_keep_chunk_bounds_and_decoder_support():
             plan, valid = view["generation_chunks"], view["valid"]
             sizes = torch.bincount(plan)
             assert ((sizes >= 3) & (sizes <= 20)).all()
-            assert torch.equal(plan, longest[:len(plan)])
+            assert torch.equal(plan, longest[: len(plan)])
             assert plan[~valid].eq(plan[valid][-1]).all()
         assert prepare_chunk_plan(planned, cfg, "cpu") is planned
 
@@ -126,8 +130,8 @@ def test_shared_causality_all_modalities_and_grouped_backward_edges():
     plan = visibility_groups(layout)
     actual = torch.zeros_like(mask)
     for i in range(len(plan.cu_query) - 1):
-        q = plan.query[plan.cu_query[i]:plan.cu_query[i + 1]]
-        k = plan.key[plan.cu_key[i]:plan.cu_key[i + 1]]
+        q = plan.query[plan.cu_query[i] : plan.cu_query[i + 1]]
+        k = plan.key[plan.cu_key[i] : plan.cu_key[i + 1]]
         actual[q[:, None], k] = True
     assert torch.equal(actual, mask)
     dropped = replace(layout, history_dropout=torch.ones(3, 3, dtype=torch.bool)).dense()
@@ -143,7 +147,7 @@ def test_future_video_and_caption_length_cannot_change_earlier_blocks():
     results, masks = [], []
     for sample in (doc, changed):
         torch.manual_seed(98)
-        inputs, *_ = WorldViewsObjective(cfg).pack(sample, "cpu", evaluation_sigma=.5)
+        inputs, *_ = DiffusionObjective(cfg).pack(sample, "cpu", evaluation_sigma=0.5)
         layout = inputs["attention_mask"]
         text = inputs["text_indices"]
         masks.append(layout.dense(text))
@@ -157,16 +161,27 @@ def test_future_video_and_caption_length_cannot_change_earlier_blocks():
 def test_caption_majority_is_strict_and_uses_original_caption_duration():
     cfg = df_recipe()
     # A synthetic frame clock makes exact majority/tie boundaries explicit.
-    view = dict(frames=torch.tensor([0., 17., 27., 37., 48., 57.]),
-                generation_chunks=torch.arange(6), source_frames=77, source_start=0,
-                caption_source_frames=77, caption_scene="A room.",
-                caption_motions=["Walk in.", "Turn left.", "Sit down.", "Wave."])
+    view = dict(
+        frames=torch.tensor([0.0, 17.0, 27.0, 37.0, 48.0, 57.0]),
+        generation_chunks=torch.arange(6),
+        source_frames=77,
+        source_start=0,
+        caption_source_frames=77,
+        caption_scene="A room.",
+        caption_motions=["Walk in.", "Turn left.", "Sit down.", "Wave."],
+    )
     assert caption_specs(view, cfg) == [
-        (0, "A room.\nWalk in."), (1, "A room."), (2, "A room."),
-        (3, "A room.\nSit down."), (4, "A room."), (5, "A room.\nWave.")]
+        (0, "A room.\nWalk in."),
+        (1, "A room."),
+        (2, "A room."),
+        (3, "A room.\nSit down."),
+        (4, "A room."),
+        (5, "A room.\nWave."),
+    ]
     # Slicing a clip never shrinks the original window's majority denominator.
-    view.update(frames=torch.tensor([0.]), generation_chunks=torch.tensor([0]),
-                source_start=37, source_frames=10)
+    view.update(
+        frames=torch.tensor([0.0]), generation_chunks=torch.tensor([0]), source_start=37, source_frames=10
+    )
     assert caption_specs(view, cfg) == [(0, "A room.")]
     view["source_frames"] = 11
     assert caption_specs(view, cfg) == [(0, "A room.\nSit down.")]
@@ -174,8 +189,12 @@ def test_caption_majority_is_strict_and_uses_original_caption_duration():
 
 def test_short_piece_uses_its_sliced_motions_without_parent_narrative_or_labels():
     cfg, view = df_recipe(), planned_document()["views"][0]
-    view.update(caption_scene="A street.", caption_motions=["Turn.", "Stop.", "Wait.", "Leave."],
-                caption_source_frames=77, prompt="Wrong unsliced parent story.")
+    view.update(
+        caption_scene="A street.",
+        caption_motions=["Turn.", "Stop.", "Wait.", "Leave."],
+        caption_source_frames=77,
+        prompt="Wrong unsliced parent story.",
+    )
     specs = caption_specs(view, cfg)
     assert len(specs) == 4
     assert all("parent" not in text and "[CHUNK]" not in text for _, text in specs)
@@ -190,9 +209,11 @@ def test_rf_promotes_predicted_block_and_resume_keeps_both_plan_and_cut(tmp_path
     cfg.resampling_forcing = True
     cfg.resampling_forcing_warmup_steps = 0
     cfg.resampling_forcing_clean_chunks = 0
-    objective = WorldViewsObjective(cfg)
-    objective.sample_sigmas = lambda count, device: (torch.full((count,), .5), torch.ones(count), False)
-    _, log = objective(lambda **x: SimpleNamespace(sample=torch.zeros_like(x["hidden_states"])), document, "cpu", 0)
+    objective = DiffusionObjective(cfg)
+    objective.sample_sigmas = lambda count, device: (torch.full((count,), 0.5), torch.ones(count), False)
+    _, log = objective.compute_loss(
+        lambda **x: SimpleNamespace(sample=torch.zeros_like(x["hidden_states"])), document, "cpu", 0
+    )
     assert log["rf"]
     pending = objective.resample_document(document)
     assert pending["views"][0]["clean_prefix_chunks"] == 2
@@ -206,13 +227,16 @@ def test_rf_promotes_predicted_block_and_resume_keeps_both_plan_and_cut(tmp_path
     assert torch.equal(rng, torch.get_rng_state())
     _, _, weights, records, _ = objective.pack(saved, "cpu", override=override)
     promoted = saved["views"][0]["generation_chunks"] == 1
-    torch.testing.assert_close(records[0]["noisy"][:, :, promoted], override[0][:, :, promoted], rtol=0, atol=0)
+    torch.testing.assert_close(
+        records[0]["noisy"][:, :, promoted], override[0][:, :, promoted], rtol=0, atol=0
+    )
     assert not torch.equal(override[0][:, :, promoted], saved["views"][0]["latent"][:, :, promoted])
     assert weights[promoted].eq(0).all()
 
 
 def test_default_df_rf_does_not_replace_its_first_prediction_with_ground_truth():
     from pathlib import Path
+
     from utils.config import load_config
 
     default = load_config(Path(__file__).resolve().parents[1] / "configs/diffusion_forcing.yaml")
@@ -223,9 +247,11 @@ def test_default_df_rf_does_not_replace_its_first_prediction_with_ground_truth()
     cfg.resampling_forcing_clean_chunks = default.resampling_forcing_clean_chunks
     for view in document["views"]:
         view["clean_prefix_chunks"] = 0
-    objective = WorldViewsObjective(cfg)
-    objective.sample_sigmas = lambda count, device: (torch.full((count,), .5), torch.ones(count), False)
-    _, log = objective(lambda **x: SimpleNamespace(sample=torch.zeros_like(x["hidden_states"])), document, "cpu", 0)
+    objective = DiffusionObjective(cfg)
+    objective.sample_sigmas = lambda count, device: (torch.full((count,), 0.5), torch.ones(count), False)
+    _, log = objective.compute_loss(
+        lambda **x: SimpleNamespace(sample=torch.zeros_like(x["hidden_states"])), document, "cpu", 0
+    )
     assert log["rf"]
     pending = objective.resample_document(document)
     _, _, weights, records, _ = objective.pack(pending, "cpu", override=log["x0"])
@@ -234,20 +260,20 @@ def test_default_df_rf_does_not_replace_its_first_prediction_with_ground_truth()
         assert view["clean_prefix_chunks"] == 1
         torch.testing.assert_close(record["noisy"][:, :, prefix], log["x0"][i][:, :, prefix], rtol=0, atol=0)
         assert not torch.equal(record["noisy"][:, :, prefix], view["latent"][:, :, prefix])
-        assert weights[record["start"]:record["stop"]][prefix].eq(0).all()
+        assert weights[record["start"] : record["stop"]][prefix].eq(0).all()
 
 
 def test_inference_never_samples_or_reads_ground_truth_clean_prefix():
     cfg, doc = df_recipe(), planned_document()
     view = doc["views"][0]
     view.pop("clean_prefix_chunks")
-    objective = WorldViewsObjective(cfg)
+    objective = DiffusionObjective(cfg)
     rng = torch.get_rng_state()
     planned = objective.prepare_document(doc, "cpu", training=False)
     assert "clean_prefix_chunks" not in planned["views"][0]
     assert torch.equal(rng, torch.get_rng_state())
     current = [torch.randn_like(view["latent"])]
-    state = dict(chunk=2, sigma=.5, current=current, conditions=[None], cached=True)
+    state = dict(chunk=2, sigma=0.5, current=current, conditions=[None], cached=True)
     inputs, *_ = objective.pack(planned, "cpu", inference=state)
     layout = inputs["attention_mask"]
     assert layout.chunk.max() == 2
@@ -261,25 +287,33 @@ def test_inference_never_samples_or_reads_ground_truth_clean_prefix():
 
 def test_source_stream_encodes_the_plan_before_sampling_a_clean_prefix(monkeypatch):
     from collections import deque
-    from trainer.diffusion import SourceStream
+
+    from dataset.loader import BatchLoader
     from utils import distributed as groups
 
     cfg, raw = df_recipe(), feature_document(frames=77)
     cfg.h3.text_conditioning = "text_only"
-    cfg.cond_text_dropout_ratio = 0.
+    cfg.cond_text_dropout_ratio = 0.0
     view = raw["views"][0]
-    view.update(caption_scene="A person.", caption_motions=["Walk.", "Stop.", "Sit.", "Wave."],
-                caption_source_frames=77)
+    view.update(
+        caption_scene="A person.",
+        caption_motions=["Walk.", "Stop.", "Sit.", "Wave."],
+        caption_source_frames=77,
+    )
     requests = []
+
     def encode(captions):
         requests.extend(captions)
         return [torch.zeros(1, 2, 32) for _ in captions]
+
     captured = []
+
     def gather(document):
         captured.append(deepcopy(document))
         return [document]
+
     monkeypatch.setattr(groups, "gather_mixed_batch", gather)
-    stream = SourceStream.__new__(SourceStream)
+    stream = BatchLoader.__new__(BatchLoader)
     stream.cfg, stream.validation = cfg, False
     stream.video = SimpleNamespace(device="cpu", prepare=lambda document, *args: document)
     stream.text, stream.negative = encode, None
@@ -289,22 +323,32 @@ def test_source_stream_encodes_the_plan_before_sampling_a_clean_prefix(monkeypat
     assert "generation_chunks" in planned and "clean_prefix_chunks" not in planned
     assert planned["texts_by_bd"]
     assert requests[:-1] == [caption for _, caption in caption_specs(planned, cfg)]
-    trained = WorldViewsObjective(cfg).prepare_document(document, "cpu")
+    trained = DiffusionObjective(cfg).prepare_document(document, "cpu")
     assert torch.equal(trained["views"][0]["generation_chunks"], planned["generation_chunks"])
 
 
 def test_cache_keeps_each_past_caption_once_with_its_clean_media(monkeypatch):
     import torch.nn.attention.flex_attention as flex
+
     original = flex.create_block_mask
     monkeypatch.setattr(flex, "create_block_mask", lambda *a, **kw: original(*a, **{**kw, "_compile": False}))
     cache = HistoryCache(offload=False)
     cfg, document = df_recipe(), planned_document()
-    objective = WorldViewsObjective(cfg)
+    objective = DiffusionObjective(cfg)
     with torch.no_grad():
         for chunk in range(4):
-            inputs, *_ = objective.pack(document, "cpu", inference=dict(
-                chunk=chunk, sigma=0., current=[document["views"][0]["latent"]],
-                conditions=[None], cached=True, update_cache=True))
+            inputs, *_ = objective.pack(
+                document,
+                "cpu",
+                inference=dict(
+                    chunk=chunk,
+                    sigma=0.0,
+                    current=[document["views"][0]["latent"]],
+                    conditions=[None],
+                    cached=True,
+                    update_cache=True,
+                ),
+            )
             layout = inputs["attention_mask"]
             key = torch.zeros(1, len(layout.kind), 1, 2)
             cache.read_and_append(key, key, layout, True)
@@ -317,29 +361,36 @@ def test_cache_keeps_each_past_caption_once_with_its_clean_media(monkeypatch):
 def test_independent_and_joint_views_cut_only_after_their_shared_partition():
     cfg, document = df_recipe(), feature_document(views=3, frames=137)
     torch.manual_seed(31)
-    joint = WorldViewsObjective(cfg).prepare_document(document, "cpu")
+    joint = DiffusionObjective(cfg).prepare_document(document, "cpu")
     first = joint["views"][0]
     assert all(torch.equal(v["generation_chunks"], first["generation_chunks"]) for v in joint["views"])
     assert all(v["clean_prefix_chunks"] == first["clean_prefix_chunks"] for v in joint["views"])
     document["isolated"] = True
     torch.manual_seed(31)
-    isolated = WorldViewsObjective(cfg).prepare_document(document, "cpu")
-    assert any(not torch.equal(v["generation_chunks"], isolated["views"][0]["generation_chunks"])
-               for v in isolated["views"][1:])
+    isolated = DiffusionObjective(cfg).prepare_document(document, "cpu")
+    assert any(
+        not torch.equal(v["generation_chunks"], isolated["views"][0]["generation_chunks"])
+        for v in isolated["views"][1:]
+    )
 
 
-@pytest.mark.parametrize("views,isolated,offload", [(1, True, False), (2, False, False), (2, True, False), (2, False, True)])
+@pytest.mark.parametrize(
+    "views,isolated,offload", [(1, True, False), (2, False, False), (2, True, False), (2, False, True)]
+)
 def test_df_cache_and_recompute_rollout_agree_with_causal_text(monkeypatch, views, isolated, offload):
-    import h3.modules.model as module
     import torch.nn.attention.flex_attention as flex
-    from pipeline.ar_inference import generate
+
+    import h3.modules.model as module
+    from pipeline.chunked_inference import generate
 
     original = flex.create_block_mask
     monkeypatch.setattr(flex, "create_block_mask", lambda *a, **kw: original(*a, **{**kw, "_compile": False}))
+
     def dense_attention(q, k, v, block_mask, **kw):
         qi, ki = torch.arange(q.shape[-2]), torch.arange(k.shape[-2])
         mask = block_mask.mask_mod(0, 0, qi[:, None], ki[None, :])
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+
     monkeypatch.setattr(module, "compiled_flex_attention", dense_attention)
     cfg, doc, model = df_recipe(), planned_document(views), tiny_model()
     doc["isolated"] = isolated
@@ -372,23 +423,32 @@ def test_single_sequence_recipe_rejects_caption_modes_and_conflicting_partitions
 def test_raw_i2v_request_uses_actual_fps_and_the_training_caption_partition(tmp_path):
     import numpy as np
     from PIL import Image
+
     from h3.data import temporal_layout
     from pipeline.i2v_input import prepare_request
 
     cfg = df_recipe()
     Image.new("RGB", (32, 32)).save(tmp_path / "image.png")
     camera = np.zeros((77, 10), np.float32)
-    camera[:, :2] = 1.
+    camera[:, :2] = 1.0
     np.save(tmp_path / "camera.npy", camera)
-    request = dict(fps=16, prompt="A room.", scene="A room.", chunks=["Enter.", "Turn.", "Sit.", "Wave."],
-                   views=[dict(image="image.png", camera="camera.npy")])
+    request = dict(
+        fps=16,
+        prompt="A room.",
+        scene="A room.",
+        chunks=["Enter.", "Turn.", "Sit.", "Wave."],
+        views=[dict(image="image.png", camera="camera.npy")],
+    )
     image_calls, captions = [], []
+
     def encode_image(pixels, generator):
         image_calls.append(pixels.shape)
         return torch.zeros(1, 24, 1, 2, 2), temporal_layout(1), torch.ones(1, 1)
+
     def encode_text(pairs):
         captions.extend(caption for caption, _ in pairs)
         return [dict(features=torch.zeros(1, 3, 32), tags=torch.ones(3, dtype=torch.long)) for _ in pairs]
+
     video = SimpleNamespace(device="cpu", encode=encode_image)
     text = SimpleNamespace(i2v=encode_text)
     document = prepare_request(request, tmp_path, video, text, cfg)
@@ -406,13 +466,19 @@ def test_fixed_video_feature_bank_rebinds_captions_after_each_new_partition():
     cfg, doc = df_recipe(), feature_document(frames=77)
     view = doc["views"][0]
     motions = ["Walk.", "Stop.", "Turn.", "Wave."]
-    captions = ["A room."] + ["\n".join(["A room.", *motions[start:stop]])
-                              for start in range(4) for stop in range(start + 1, 5)]
-    view.update(caption_scene="A room.", caption_motions=motions, caption_source_frames=77,
-                caption_feature_bank={text: dict(features=torch.full((1, 3, 32), float(i)),
-                                                tags=torch.ones(3, dtype=torch.long))
-                                      for i, text in enumerate(captions)})
-    objective = WorldViewsObjective(cfg)
+    captions = ["A room."] + [
+        "\n".join(["A room.", *motions[start:stop]]) for start in range(4) for stop in range(start + 1, 5)
+    ]
+    view.update(
+        caption_scene="A room.",
+        caption_motions=motions,
+        caption_source_frames=77,
+        caption_feature_bank={
+            text: dict(features=torch.full((1, 3, 32), float(i)), tags=torch.ones(3, dtype=torch.long))
+            for i, text in enumerate(captions)
+        },
+    )
+    objective = DiffusionObjective(cfg)
     plans = set()
     for seed in range(12):
         torch.manual_seed(seed)

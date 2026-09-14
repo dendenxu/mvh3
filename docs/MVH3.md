@@ -3,35 +3,38 @@
 MVH3 trains the existing MiniMax H3 attention weights on WorldViews data. The
 layout follows WorldViews: the trainer runs updates, the model defines the
 objective, pipelines generate videos, and datasets supply examples. Native H3
-layers and kernels live in `h3/`.
+layers and kernels live in `h3/`. There is one root `utils/` for shared helpers;
+there are no nested utility or vendor trees. Imports are grouped and sorted.
+Long workflows use blank lines and short Step comments to mark their phases.
 
 ## Start here
 
 | Responsibility                                   | Code to read                                                             |
 | ------------------------------------------------ | ------------------------------------------------------------------------ |
 | Config loading and task selection                | `main.py`, `utils/config.py`                                             |
-| Training loop and one optimizer update           | `trainer/diffusion.py`: `Trainer.train_loop`, `train_step`               |
-| Source loading, encoding and SP sample queue     | `dataset/stream.py`: `SourceStream.next`                                 |
-| Pixel/camera adaptation, video VAE and Qwen      | `utils/h3_wrapper.py`                                                    |
+| Training loop and one optimizer update           | `trainer/diffusion.py`: `DiffusionTrainer.train_loop`, `train_step`               |
+| Source loading, encoding and SP sample queue     | `dataset/loader.py`: `BatchLoader.next`                                 |
+| Video VAE and native Qwen image/text features      | `h3/encoders.py`                                                    |
 | Chunk boundaries, clean cut and caption overlap  | `model/chunks.py`, `utils/captions.py`                                   |
-| Noise sampling, flow loss and resampling forcing | `model/diffusion.py`: `WorldViewsObjective`                              |
+| Noise sampling, flow loss and resampling forcing | `model/diffusion.py`: `DiffusionObjective`                              |
 | Joint token order, masks, camera/time tables     | `model/packing.py`: `SequencePacker`                                     |
-| Image/camera request to saved videos             | `pipeline/inference.py`: `run`                                           |
-| Native joint sampling / trained chunk rollout    | `pipeline/joint_inference.py`, `pipeline/ar_inference.py`                |
+| Image/camera request to saved videos             | `pipeline/inference.py`: `run_inference`                                           |
+| Native joint sampling / trained chunk rollout    | `pipeline/full_sequence_inference.py`, `pipeline/chunked_inference.py`                |
 | Native denoiser, camera encoding and attention   | `h3/modules/model.py`, `camera.py`, `masking.py`, `grouped_attention.py` |
 | Camera modes and trainable attention             | `h3/modules/model.py`: `MiniMaxH3Transformer3DModel.configure_attention` |
-| Optimizer parameter groups                       | `h3/utils/training.py`: `parameter_groups`                               |
+| Optimizer parameter groups                       | `trainer/diffusion.py`: `parameter_groups`                               |
 | FSDP, checkpointing and compilation              | `h3/distributed/fsdp.py`                                                 |
 | Checkpoint state and averaged weights            | `utils/checkpoint.py`, `utils/ema.py`                                    |
 
-`scripts/infer.py` is a command-line adapter to `pipeline.inference.run`.
+`scripts/infer.py` is a command-line adapter to `pipeline.inference.run_inference`.
 `main.py` calls that same pipeline for an `inference_request`; dataset validation
-uses `Trainer.validate`. Scripts contain experiment commands and verification,
+uses `DiffusionTrainer.validate`. Scripts contain experiment commands and verification,
 not implementations imported by training.
 
 The network is `MiniMaxH3Transformer3DModel` in `h3/modules/model.py`. Its
 `__init__` defines input projections, the text refiner, Transformer blocks and
-output heads; `forward` runs them. Call `configure_attention` on that model
+output heads; `from_pretrained` loads the original checkpoint, and `forward`
+runs the layers. Call `configure_attention` on that model
 before `wrap_model`. FSDP handles distribution, while the model owns its camera
 modes and trainable layers.
 
@@ -52,12 +55,11 @@ worldviews_reference.yaml + presampled_data.yaml
 `main.py` defaults to `diffusion_forcing.yaml`. Select
 `stage1_compile_buckets.yaml` explicitly for the full-data Stage 1 run.
 Continue a DF checkpoint with its saved `resolved.yaml` and `h3.stage=2`.
-`worldviews_stage2.yaml` belongs to the older base recipe. Stage transition,
-LR warmup and RF warmup are separate settings.
+Stage transition, LR warmup and RF warmup are separate settings.
 
 ## Training data flow
 
-1. `SourceStream` samples the paired Ours Parquets using the existing WorldViews
+1. `BatchLoader` samples the paired Ours Parquets using the existing WorldViews
    dataset classes. Stage 1 keeps SHORT views independent within the same update;
    Stage 2 uses FULL windows. Original batch groups and shape remaps are retained.
 2. `VideoEncoder` encodes each view separately, including its conditioning image
@@ -66,7 +68,7 @@ LR warmup and RF warmup are separate settings.
    latents. `caption_specs` selects ordinary scene/motion prose for those blocks.
    Qwen3-VL layer 50 encodes each caption with its conditioning image.
 4. Each SP rank prepares its own source sample. `gather_mixed_batch` queues every
-   sample on every SP rank. `WorldViewsObjective.prepare_document` then chooses a
+   sample on every SP rank. `DiffusionObjective.prepare_document` then chooses a
    clean-prefix cut at an existing block boundary.
 5. The objective samples noise and supplies latents to `SequencePacker`. The
    packer lays out text, image-condition and video tokens, then inactive padding.
@@ -156,13 +158,12 @@ resolved config, numeric history, media and checkpoint manifests.
 
 ## Checking changes
 
-Run `python scripts/test_cpu.py` in the existing environment. The suite covers
+Run `PYTHONPATH=../python_deps:../diffusers/src python -m pytest tests -q` in the existing environment. The suite covers
 causality, camera identity, caption overlap, decoder support, loss, EMA, resume
 contracts and compile padding. Training-policy or packing refactors also need
 fixed-input, restored-RNG comparisons against the previous implementation.
 CPU checks do not establish full-model GPU throughput or convergence.
 
-Commands and request examples are in the root README. Dated results, failed
-diagnostics and superseded recipes are in [EXPERIMENTS.md](EXPERIMENTS.md).
-Keep new runtime reports under ignored `local/` paths rather than expanding
-this code guide with experiment logs.
+Commands and request examples are in the root README. Temporary validation
+scripts and dated reports belong under ignored `local/`. Keep this guide focused
+on current code, without old experiment recipes or failed-probe diaries.

@@ -1,17 +1,31 @@
 """Per-layer head-sharded history cache with a bounded GPU budget."""
 
-import torch
 from dataclasses import replace
 
-from h3.modules.masking import CLEAN, CONDITION, TokenLayout, build_block_mask
+import torch
+
+from h3.modules.masking import CLEAN, CONDITION, build_block_mask
 
 
 class HistoryCache:
 
-    def __init__(self, offload=True, budget_bytes=0, sink_chunks=0, window_chunks=0, sink_view0_only=False,
-                 intervals=None, sink_frames=0, window_frames=0):
+    def __init__(
+        self,
+        offload=True,
+        budget_bytes=0,
+        sink_chunks=0,
+        window_chunks=0,
+        sink_view0_only=False,
+        intervals=None,
+        sink_frames=0,
+        window_frames=0,
+    ):
         self.offload, self.budget_bytes = offload, budget_bytes
-        self.sink_chunks, self.window_chunks, self.sink_view0_only = sink_chunks, window_chunks, sink_view0_only
+        self.sink_chunks, self.window_chunks, self.sink_view0_only = (
+            sink_chunks,
+            window_chunks,
+            sink_view0_only,
+        )
         self.intervals, self.sink_frames, self.window_frames = intervals, sink_frames, window_frames
         self.segments = []
 
@@ -23,13 +37,21 @@ class HistoryCache:
             raise RuntimeError("History caches are inference-only")
         old_count = sum(x[0].shape[1] for x in self.segments)
         layouts = [segment[2].to(key.device) for segment in self.segments] + [layout]
-        combined = replace(layout, **{name: torch.cat([getattr(x, name) for x in layouts])
-                                      for name in ("kind", "chunk", "scope", "active")})
+        combined = replace(
+            layout,
+            **{
+                name: torch.cat([getattr(x, name) for x in layouts])
+                for name in ("kind", "chunk", "scope", "active")
+            },
+        )
         qn, kn = key.shape[1], old_count + key.shape[1]
 
         def mask_mod(b, h, q, k):
-            return (q < qn) & (k < kn) & combined.mask_mod(b, h,
-                                                           (q + old_count).clamp_max(kn - 1), k.clamp_max(kn - 1))
+            return (
+                (q < qn)
+                & (k < kn)
+                & combined.mask_mod(b, h, (q + old_count).clamp_max(kn - 1), k.clamp_max(kn - 1))
+            )
 
         mask = build_block_mask(mask_mod, qn, kn, key.device)
         # Copy CPU history directly into its final attention buffer. Moving
@@ -39,8 +61,8 @@ class HistoryCache:
         offset = 0
         for old_key, old_value, _ in [*self.segments, (key, value, layout)]:
             count = old_key.shape[1]
-            joined_key[:, offset:offset + count].copy_(old_key, non_blocking=True)
-            joined_value[:, offset:offset + count].copy_(old_value, non_blocking=True)
+            joined_key[:, offset : offset + count].copy_(old_key, non_blocking=True)
+            joined_value[:, offset : offset + count].copy_(old_value, non_blocking=True)
             offset += count
         result = joined_key, joined_value, mask
         if update:
@@ -48,18 +70,19 @@ class HistoryCache:
             if layout.single_sequence:
                 select |= (layout.kind == CONDITION) & (layout.chunk >= 0) & layout.active
             if select.any():
-                cache_layout = self._select(layout, select)
+                cache_layout = self.select_layout(layout, select)
                 self.segments.append((key[:, select].detach(), value[:, select].detach(), cache_layout))
-                self._trim(int(layout.chunk[select].max()))
-                self._place()
+                self.trim_history(int(layout.chunk[select].max()))
+                self.place_history()
         return result
 
     @staticmethod
-    def _select(layout, select):
-        return replace(layout, **{name: getattr(layout, name)[select]
-                                  for name in ("kind", "chunk", "scope", "active")})
+    def select_layout(layout, select):
+        return replace(
+            layout, **{name: getattr(layout, name)[select] for name in ("kind", "chunk", "scope", "active")}
+        )
 
-    def _trim(self, newest):
+    def trim_history(self, newest):
         window = self.window_frames if self.intervals is not None else self.window_chunks
         if window <= 0:
             return
@@ -81,11 +104,16 @@ class HistoryCache:
                 sink &= layout.scope == 0
             keep = sink | recent
             if keep.any():
-                segments.append((key[:, keep.to(key.device)], value[:, keep.to(value.device)],
-                                 self._select(layout, keep)))
+                segments.append(
+                    (
+                        key[:, keep.to(key.device)],
+                        value[:, keep.to(value.device)],
+                        self.select_layout(layout, keep),
+                    )
+                )
         self.segments = segments
 
-    def _place(self):
+    def place_history(self):
         if not self.offload:
             return
         used, result = 0, []
@@ -95,7 +123,7 @@ class HistoryCache:
             keep = min(count, max(0, self.budget_bytes - used) // token_bytes)
             cut = count - keep
             if keep:
-                resident_layout = self._select(layout, slice(cut, None))
+                resident_layout = self.select_layout(layout, slice(cut, None))
                 # Clone a split suffix so its storage cannot retain an offloaded prefix.
                 resident_key = key[:, cut:].contiguous().clone() if cut else key
                 resident_value = value[:, cut:].contiguous().clone() if cut else value
@@ -103,7 +131,7 @@ class HistoryCache:
                 used += keep * token_bytes
             if cut:
                 host_key, host_value = key[:, :cut].cpu(), value[:, :cut].cpu()
-                host_layout = self._select(layout, slice(None, cut)).to("cpu")
+                host_layout = self.select_layout(layout, slice(None, cut)).to("cpu")
                 if torch.cuda.is_available():
                     host_key = host_key if host_key.is_pinned() else host_key.pin_memory()
                     host_value = host_value if host_value.is_pinned() else host_value.pin_memory()
@@ -121,14 +149,26 @@ def make_caches(model, cfg, enabled=True, document=None):
     options = {}
     if document is not None and any("generation_chunks" in view for view in document["views"]):
         from model.chunks import chunk_intervals
+
         # Existing sink/window knobs retain their WorldViews source-time units.
-        options = dict(intervals=[chunk_intervals(view, cfg.chunk_size, cfg.h3.get("chunk_size_range") is not None)
-                                  for view in document["views"]],
-                       sink_frames=max(0, 4 * cfg.kv_sink_size - 3), window_frames=4 * cfg.kv_window_size)
+        options = dict(
+            intervals=[
+                chunk_intervals(view, cfg.chunk_size, cfg.h3.get("chunk_size_range") is not None)
+                for view in document["views"]
+            ],
+            sink_frames=max(0, 4 * cfg.kv_sink_size - 3),
+            window_frames=4 * cfg.kv_window_size,
+        )
     return [
-        HistoryCache(cfg.kv_offload, budget, math_ceil_div(cfg.kv_sink_size, cfg.chunk_size),
-                     math_ceil_div(cfg.kv_window_size, cfg.chunk_size), cfg.kv_sink_view0_only,
-                     **options) for _ in range(count)
+        HistoryCache(
+            cfg.kv_offload,
+            budget,
+            math_ceil_div(cfg.kv_sink_size, cfg.chunk_size),
+            math_ceil_div(cfg.kv_window_size, cfg.chunk_size),
+            cfg.kv_sink_view0_only,
+            **options,
+        )
+        for _ in range(count)
     ]
 
 

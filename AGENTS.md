@@ -2,9 +2,10 @@
 
 Read `docs/MVH3.md` before changing the training port.
 
-- Business code is for human maintainers, including previously authored code. Keep the WorldViews call flow direct, names descriptive, and comments focused on non-obvious contracts. Avoid compressed nested expressions, unnecessary abstractions, forwarding layers and arbitrary file splits. Use plain helper names without a leading underscore.
-- Module names must describe their responsibility. Use existing owners before adding files; do not introduce generic `setup` modules. Camera/attention configuration belongs to the native model, optimizer groups to training helpers, and FSDP wrapping to distributed code. Delete confirmed unused code instead of keeping forwarding aliases.
-- Refactor in the current checkout unless the user asks for a separate worktree. Keep experiment history in `docs/EXPERIMENTS.md`; the code guide explains the current structure and behavior.
+- Business code is for human maintainers, including previously authored code. Keep the WorldViews call flow direct, names descriptive, and comments focused on non-obvious contracts. Avoid compressed nested expressions, unnecessary abstractions, forwarding layers and arbitrary file splits. Use plain helper names without a leading underscore. Sort imports into standard library, third-party and repository groups; use normal line breaks, blank lines between phases, and short Step comments for long workflows.
+- Keep one root `utils/` directory. Native schedulers belong to `h3/scheduler.py`, optional UniPC to `pipeline/unipc.py`, checkpoint conversion to `h3/checkpoint.py`, and parameter groups to `trainer/diffusion.py`. Do not recreate `h3/utils`, `vendor`, or nested WorldViews/Wan copies. One-off probes and verify scripts belong under ignored `local/`, never in committed source.
+- Module names must describe their responsibility. Use existing owners before adding files; do not introduce generic `setup` modules. Camera/attention configuration belongs to the native model, optimizer groups to the trainer, and FSDP wrapping to distributed code. Delete confirmed unused code instead of keeping forwarding aliases.
+- Refactor in the current checkout unless the user asks for a separate worktree. Keep experiment evidence under ignored `local/`; the code guide explains only current structure and behavior.
 - Work in this H3 checkout. `origin` is `https://github.com/dendenxu/mvh3`; `upstream` is the official MiniMax repository.
 - Camera conditioning must add zero trainable parameters. Change analytic encoding on the existing attention Q/K and train existing H3 weights. Do not add AR branches, LoRA, camera MLPs, adapters, gates, or expanded projections.
 - Use the paired Ours training data/configs: `pre200_short.yaml` first, then `pre200.yaml`. Preserve their exact windows, captions, batch groups and existing shape remaps. Stage-1 views remain independent within the same optimizer update. Never further reduce batch/views/length/resolution to hide an OOM.
@@ -23,6 +24,6 @@ Read `docs/MVH3.md` before changing the training port.
 - GPU block masks require compiled flex attention. Never allow eager flex fallback on long sequences; bounded validation must accommodate device/shape compile variants and actually test the stage transition.
 - Use the user's existing WorldViews environment and original FA4 runtime. Do not install FA4 monkeypatches, add kernel synchronization, or replace its JIT cache. Investigate H3 inputs, masks, streams, and compilation first; a synchronization diagnostic alone does not establish an accepted runtime fix.
 - Keep source-data paths in local configuration/environment variables. Never commit weights, data, caches, credentials, or local runtime reports.
-- Run `python scripts/test_cpu.py` for model/mask/curriculum changes. Tiny CPU tests do not establish GPU memory, pretrained quality, or distributed correctness.
+- Run `PYTHONPATH=../python_deps:../diffusers/src python -m pytest tests -q` for model/mask/curriculum changes. Tiny CPU tests do not establish GPU memory, pretrained quality, or distributed correctness.
 - Do not launch or stop cluster training without an explicit user instruction to do so. In particular, no `mlx job submit/stop`, `hr set/restart/stop/nuke`, or broad process kills.
 - Keep code, comments, and durable notes in English. User-facing times use UTC+8.

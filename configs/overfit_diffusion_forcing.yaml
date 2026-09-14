@@ -1,9 +1,30 @@
-parents: [overfit_sequence.yaml, diffusion_forcing.yaml]
-# Repartition the same complete video on each update. RF is tested separately.
+# One complete paired sequence; random latent blocks and fixed EMA 0.995.
+parents:
+- worldviews.yaml
+- diffusion_forcing.yaml
 max_iters: 2048
 save_interval: 256
 auto_resume: true
+generator_cpu_offload: true
 resampling_forcing: false
 h3:
-  noise_sampling: shifted_uniform
   logdir: local/overfit_diffusion_forcing
+  noise_sampling: shifted_uniform
+  grouped_attention_backward: true
+overfit:
+  frames: 77
+  views:
+  - 0
+  eval_interval: 64
+  generation_interval: 256
+  eval_sigmas:
+  - 0.25
+  - 0.5
+  - 0.75
+  - 0.95
+  eval_seed: 70000
+  generation_seed: 81000
+  minimum_relative_improvement: 0.5
+ema_weight: 0.995
+ema_cpu_offload: true
+ema_warmup: false

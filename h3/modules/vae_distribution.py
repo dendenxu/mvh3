@@ -1,9 +1,11 @@
 # Adapted from HuggingFace Diffusers (Apache-2.0); see licenses/DIFFUSERS-APACHE-2.0.txt.
 """H3 Gaussian posterior and explicit encode/decode results."""
 from dataclasses import dataclass
+
 import numpy as np
 import torch
-from h3.utils.random import randn_tensor
+
+from utils.random import randn_tensor
 
 
 @dataclass
@@ -26,9 +28,9 @@ class DiagonalGaussianDistribution(object):
         self.std = torch.exp(0.5 * self.logvar)
         self.var = torch.exp(self.logvar)
         if self.deterministic:
-            self.var = self.std = torch.zeros_like(self.mean,
-                                                   device=self.parameters.device,
-                                                   dtype=self.parameters.dtype)
+            self.var = self.std = torch.zeros_like(
+                self.mean, device=self.parameters.device, dtype=self.parameters.dtype
+            )
 
     def sample(self, generator: torch.Generator | None = None) -> torch.Tensor:
         # make sure sample is on the same device as the parameters and has same dtype
@@ -52,8 +54,11 @@ class DiagonalGaussianDistribution(object):
                 )
             else:
                 return 0.5 * torch.sum(
-                    torch.pow(self.mean - other.mean, 2) / other.var + self.var / other.var - 1.0 - self.logvar +
-                    other.logvar,
+                    torch.pow(self.mean - other.mean, 2) / other.var
+                    + self.var / other.var
+                    - 1.0
+                    - self.logvar
+                    + other.logvar,
                     dim=[1, 2, 3],
                 )
 

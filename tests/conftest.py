@@ -1,7 +1,7 @@
 """Use the pinned sibling dependencies when running from the downloaded bundle."""
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 for candidate in (ROOT.parent / "python_deps", ROOT.parent / "diffusers" / "src", ROOT):

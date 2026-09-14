@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import os
 import sys
-from os.path import dirname, join, basename, exists
+from os.path import basename, dirname, join
 
-import importlib
 from torch.utils.cpp_extension import load
 
 
@@ -16,35 +14,20 @@ def extra_cflags() -> list[str]:
     return ["-O3", "-std=c++17"]
 
 
-def import_so_as_module(name: str, so_path: str):
-    spec = importlib.util.spec_from_file_location(name, so_path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def load_ext(src: str = 'cpp/easy_utils_ext.cpp'):
+def load_ext(src: str = "cpp/easy_utils_ext.cpp"):
     this_dir = dirname(__file__)
     src = join(this_dir, src)
-    name = 'mvh3_' + basename(src).replace('.', '_')
-    # build_dir = join(this_dir, "_torch_extensions", name)
-    # so_path = join(build_dir, f"{name}.so")
+    name = "mvh3_" + basename(src).replace(".", "_")
 
-    _EXT = globals().get(name, None)
-    if _EXT is not None:
-        return _EXT
+    extension = globals().get(name, None)
+    if extension is not None:
+        return extension
 
-    # if exists(so_path) and not force_rebuild:
-    #     _EXT = import_so_as_module(name, so_path)
-    # else:
-        # os.makedirs(build_dir, exist_ok=True)
-    _EXT = load(
+    extension = load(
         name=name,
         sources=[src],
         extra_cflags=extra_cflags(),
-        # build_directory=build_dir,
         with_cuda=False,
     )
-    globals()[name] = _EXT
-    return _EXT
+    globals()[name] = extension
+    return extension

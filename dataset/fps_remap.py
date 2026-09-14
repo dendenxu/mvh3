@@ -26,13 +26,13 @@ Value: (effective_model_fps, snapped_source_fps).
   ratio = snapped_source_fps / effective_model_fps
   effective_fps reported to model = effective_model_fps
 """
+
 from __future__ import annotations
 
 from fractions import Fraction
 from typing import Tuple
 
 from utils.console import warn_once
-
 
 # Format: outer model_fps → inner source_fps → (effective_model_fps, snapped_src_fps).
 # Float keys handle broadcast/drop-frame fps (e.g. NTSC 29.97 / 59.94 / 23.976)
@@ -43,18 +43,18 @@ from utils.console import warn_once
 FPS_REMAP_FACTORY: dict[int, dict[float, Tuple[int, int]]] = {
     16: {
         # source: (effective_model_fps, snapped_src_fps) → ratio
-        15: (16, 16),   # snap up to 16 → ratio 1.0 (downsample-only, no resample needed)
-        23.976: (16, 24),   # NTSC film 24*1000/1001 → snap to 24 (ratio 3/2)
-        25: (16, 24),       # 3/2  q=2  alternating (was 25/16 = 1.5625, q=16 chaotic)
-        29.97: (15, 30),    # NTSC drop-frame → snap to 30 (ratio 2)
-        29.997: (15, 30),   # NTSC broadcast → snap to 30 (ratio 2)
-        29.916666666666668: (15, 30),   # NTSC broadcast → snap to 30 (ratio 2)
-        30: (15, 30),       # 2.0  q=1  perfect    (was 30/16 = 1.875,  q=8 chaotic)
-        47.952047952047955: (16, 48),   # NTSC 48*1000/1001 → snap to 48 (ratio 3/1)
-        50: (15, 50),       # 10/3 q=3  (drop model_fps 16→15; was 50/16 = 25/8, q=8 chaotic)
-        59.94: (15, 60),    # NTSC drop-frame → snap to 60 (ratio 4)
-        60: (15, 60),       # 4.0  q=1  perfect    (was 60/16 = 3.75,   q=4 chaotic)
-        60.08010680907877: (15, 60),       # 4.0  q=1  perfect    (was 60/16 = 3.75,   q=4 chaotic)
+        15: (16, 16),  # snap up to 16 → ratio 1.0 (downsample-only, no resample needed)
+        23.976: (16, 24),  # NTSC film 24*1000/1001 → snap to 24 (ratio 3/2)
+        25: (16, 24),  # 3/2  q=2  alternating (was 25/16 = 1.5625, q=16 chaotic)
+        29.97: (15, 30),  # NTSC drop-frame → snap to 30 (ratio 2)
+        29.997: (15, 30),  # NTSC broadcast → snap to 30 (ratio 2)
+        29.916666666666668: (15, 30),  # NTSC broadcast → snap to 30 (ratio 2)
+        30: (15, 30),  # 2.0  q=1  perfect    (was 30/16 = 1.875,  q=8 chaotic)
+        47.952047952047955: (16, 48),  # NTSC 48*1000/1001 → snap to 48 (ratio 3/1)
+        50: (15, 50),  # 10/3 q=3  (drop model_fps 16→15; was 50/16 = 25/8, q=8 chaotic)
+        59.94: (15, 60),  # NTSC drop-frame → snap to 60 (ratio 4)
+        60: (15, 60),  # 4.0  q=1  perfect    (was 60/16 = 3.75,   q=4 chaotic)
+        60.08010680907877: (15, 60),  # 4.0  q=1  perfect    (was 60/16 = 3.75,   q=4 chaotic)
     },
 }
 
@@ -111,8 +111,10 @@ def resolve_fps_remap(model_fps: int, source_fps) -> Tuple[int, int]:
     if abs(src / float(nearest_key) - 1.0) <= FPS_MATCH_TOLERANCE_FRAC:
         return table[nearest_key]
     # Fallthrough: nearest standard is >FRAC away and ratio is chaotic → warn once.
-    warn_once(f'[fps_remap] unknown (model_fps={model_fps}, '
-              f'source_fps={source_fps}): nearest standard >'
-              f'{FPS_MATCH_TOLERANCE_FRAC:.0%} away, will be jumpy. '
-              f'Register in FPS_REMAP_FACTORY.')
+    warn_once(
+        f"[fps_remap] unknown (model_fps={model_fps}, "
+        f"source_fps={source_fps}): nearest standard >"
+        f"{FPS_MATCH_TOLERANCE_FRAC:.0%} away, will be jumpy. "
+        f"Register in FPS_REMAP_FACTORY."
+    )
     return model_fps, source_fps

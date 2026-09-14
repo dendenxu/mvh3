@@ -17,7 +17,9 @@ def load_config(path, overrides=()):
 
 
 def stage_dataset_config(cfg, stage, validation=False):
-    data = OmegaConf.create(OmegaConf.to_container(cfg.val_dataset if validation else cfg.dataset, resolve=True))
+    data = OmegaConf.create(
+        OmegaConf.to_container(cfg.val_dataset if validation else cfg.dataset, resolve=True)
+    )
     key = "stage1_val_dataset" if validation else "stage1_dataset"
     if stage == 1 and cfg.h3.get(key):
         override = cfg.h3[key]
@@ -40,8 +42,16 @@ def recipe_digest(cfg):
     h3 = data.get("h3", {})
     for key in ("checkpoint", "vae", "text_cache", "compile_cache", "logdir", "stage"):
         h3.pop(key, None)
-    for key in ("resume_ckpt", "auto_resume", "max_iters", "task", "inference_request", "inference_protocol",
-                "inference_weights", "validation_weights"):
+    for key in (
+        "resume_ckpt",
+        "auto_resume",
+        "max_iters",
+        "task",
+        "inference_request",
+        "inference_protocol",
+        "inference_weights",
+        "validation_weights",
+    ):
         data.pop(key, None)
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
@@ -61,14 +71,18 @@ def validate_config(cfg):
     if not isinstance(cfg.h3.get("single_sequence", False), bool):
         raise ValueError("H3 single_sequence must be a boolean")
     for name in ("clean_prefix_probability", "caption_overlap_threshold"):
-        value = cfg.h3.get(name, .5)
+        value = cfg.h3.get(name, 0.5)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
             raise ValueError(f"H3 {name} must be in [0, 1]")
     for name in ("chunk_group_range", "chunk_size_range"):
         bounds = cfg.h3.get(name)
-        if bounds is not None and (not isinstance(bounds, (list, tuple)) and not OmegaConf.is_list(bounds)
-                                  or len(bounds) != 2 or any(type(value) is not int for value in bounds)
-                                  or not 1 <= bounds[0] <= bounds[1]):
+        if bounds is not None and (
+            not isinstance(bounds, (list, tuple))
+            and not OmegaConf.is_list(bounds)
+            or len(bounds) != 2
+            or any(type(value) is not int for value in bounds)
+            or not 1 <= bounds[0] <= bounds[1]
+        ):
             raise ValueError(f"H3 {name} must be a positive integer [minimum, maximum] pair")
     if cfg.h3.get("chunk_size_range") is not None:
         if not cfg.h3.get("single_sequence", False) or cfg.h3.get("chunk_group_range") is not None:
@@ -82,7 +96,9 @@ def validate_config(cfg):
     if not isinstance(cfg.h3.get("grouped_attention_backward", False), bool):
         raise ValueError("H3 grouped attention backward must be a boolean")
     block_size = cfg.h3.get("training_attention_block_size", (128, 128))
-    if (not isinstance(block_size, (list, tuple)) and not OmegaConf.is_list(block_size)) or len(block_size) != 2:
+    if (not isinstance(block_size, (list, tuple)) and not OmegaConf.is_list(block_size)) or len(
+        block_size
+    ) != 2:
         raise ValueError("H3 training attention block size must be a pair")
     if any(not isinstance(value, int) or value <= 0 or value % 128 for value in block_size):
         raise ValueError("H3 training attention block dimensions must be positive multiples of 128")
@@ -91,7 +107,7 @@ def validate_config(cfg):
         raise ValueError("Unknown H3 training noise distribution")
     if cfg.model.timestep_shift <= 0 or cfg.timestep_shift <= 0:
         raise ValueError("Flow shifts must be positive")
-    if not 0 <= cfg.h3.get("condition_noise", 0.) <= 1:
+    if not 0 <= cfg.h3.get("condition_noise", 0.0) <= 1:
         raise ValueError("Condition noise must be in [0, 1]")
     if cfg.sampling_solver == "h3_euler" and (cfg.guidance_scale != 1 or cfg.cfg_rescale_factor):
         raise ValueError("H3 Euler inference uses the released CFG-distilled single-forward recipe")
@@ -122,11 +138,33 @@ def validate_config(cfg):
     if cfg.dataset.batch_size != 1:
         raise ValueError("Heterogeneous source documents require source batch_size=1")
     if any(cfg[key] for key in ("lr", "qk_lr", "ca_lr", "ca_qk_lr")):
-        raise ValueError("The port selects existing attention through ar_lr/sa_lr; other parameter scopes need an explicit mapping")
+        raise ValueError(
+            "The port selects existing attention through ar_lr/sa_lr; other parameter scopes need an explicit mapping"
+        )
     if cfg.camera_cfg or cfg.cond_pose_dropout_ratio or cfg.context_image_fill or cfg.context_mask_fill:
-        raise ValueError("Use the reference conditioning recipe; H3 joint attention needs explicit mappings for these options")
-    if not all(cfg.model[key] for key in ("base_model_history", "base_model_multiview", "ar_model_history", "ar_model_multiview")):
-        raise ValueError("The current H3 recipe uses history/multiview attention in both original-layer streams")
+        raise ValueError(
+            "Use the reference conditioning recipe; H3 joint attention needs explicit mappings for these options"
+        )
+    if not all(
+        cfg.model[key]
+        for key in ("base_model_history", "base_model_multiview", "ar_model_history", "ar_model_multiview")
+    ):
+        raise ValueError(
+            "The current H3 recipe uses history/multiview attention in both original-layer streams"
+        )
     if cfg.resampling_forcing_staircase or cfg.force_clean_history:
         raise ValueError("Use the reference RF/history settings")
     return cfg
+
+
+class ModelConfig(dict):
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as error:
+            raise AttributeError(name) from error
+
+
+def model_config(arguments):
+    return ModelConfig({key: value for key, value in arguments.items() if key not in ("self", "__class__")})

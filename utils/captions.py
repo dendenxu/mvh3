@@ -1,21 +1,13 @@
 """Select matched source captions without inserting numbering or time labels."""
 
-from model.chunks import source_chunk_ids, chunk_intervals
-
-
-def merge_chunk_captions(captions):
-    """Keep one shared scene and the selected actions in their original order."""
-    if not captions:
-        raise ValueError("Cannot build a clip caption from an empty selection")
-    parts = [caption.partition("\n[CHUNK]") for caption in captions]
-    if all(separator and scene == parts[0][0] for scene, separator, _ in parts):
-        return "\n".join(value for value in [parts[0][0].strip(), *(part[2].strip() for part in parts)] if value)
-    return "\n".join(caption.strip() for caption in captions if caption.strip())
+from model.chunks import chunk_intervals, source_chunk_ids
 
 
 def bind_caption_features(document, cfg):
     """Select pre-encoded strings for repeated fixed-video convergence probes."""
-    if not cfg.h3.get("single_sequence", False) or not any("caption_feature_bank" in v for v in document["views"]):
+    if not cfg.h3.get("single_sequence", False) or not any(
+        "caption_feature_bank" in v for v in document["views"]
+    ):
         return document
     views = []
     for view in document["views"]:
@@ -25,14 +17,22 @@ def bind_caption_features(document, cfg):
         specs = caption_specs(view, cfg)
         bank = view["caption_feature_bank"]
         values = [(chunk, bank[caption]) for chunk, caption in specs]
-        views.append({**view, "texts": [(chunk, value["features"]) for chunk, value in values],
-                      "text": values[0][1]["features"], "texts_by_bd": True, "caption_specs": specs,
-                      "text_tag_specs": {chunk: value["tags"] for chunk, value in values},
-                      "text_tags": values[0][1]["tags"]})
+        views.append(
+            {
+                **view,
+                "texts": [(chunk, value["features"]) for chunk, value in values],
+                "text": values[0][1]["features"],
+                "texts_by_bd": True,
+                "caption_specs": specs,
+                "text_tag_specs": {chunk: value["tags"] for chunk, value in values},
+                "text_tags": values[0][1]["tags"],
+            }
+        )
     return {**document, "views": views}
 
 
 def caption_specs(view, cfg):
+    """Return (block id, plain caption) using overlap in source-frame time."""
     override = cfg.get("prompt_override", "")
     if cfg.h3.get("single_sequence", False):
         intervals = chunk_intervals(view, cfg.chunk_size, cfg.h3.get("chunk_size_range") is not None)
@@ -48,8 +48,10 @@ def caption_specs(view, cfg):
             return [(i, view.get("prompt") or cfg.negative_prompt) for i in range(len(intervals))]
         offset = view.get("source_start", 0)
         duration = view.get("caption_source_frames", offset + view["source_frames"])
-        threshold = cfg.h3.get("caption_overlap_threshold", .5)
+        threshold = cfg.h3.get("caption_overlap_threshold", 0.5)
         result = []
+        # Source captions use Wan's 17-frame first window, then 20-frame windows.
+        # H3 blocks use another latent clock; compare physical frame intervals.
         for i, (start, stop) in enumerate(intervals.tolist()):
             selected = []
             for j, motion in enumerate(motions):
@@ -59,8 +61,13 @@ def caption_specs(view, cfg):
                 if right > left and overlap > threshold * (right - left):
                     selected.append(str(motion).strip())
             # A small block can cover no majority window. Retain only the scene.
-            result.append((i, "\n".join(value for value in [str(scene or "").strip(), *selected] if value)
-                           or cfg.negative_prompt))
+            result.append(
+                (
+                    i,
+                    "\n".join(value for value in [str(scene or "").strip(), *selected] if value)
+                    or cfg.negative_prompt,
+                )
+            )
         return result
     if override or not view.get("chunk_prompts"):
         return [(-1, override or view["prompt"] or cfg.negative_prompt)]

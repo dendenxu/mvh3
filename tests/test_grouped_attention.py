@@ -23,8 +23,8 @@ def test_visibility_groups_preserve_all_edges(options):
     plan = visibility_groups(layout)
     reconstructed = torch.zeros(67, 67, dtype=torch.bool)
     for i in range(plan.cu_query.numel() - 1):
-        queries = plan.query[plan.cu_query[i]:plan.cu_query[i + 1]]
-        keys = plan.key[plan.cu_key[i]:plan.cu_key[i + 1]]
+        queries = plan.query[plan.cu_query[i] : plan.cu_query[i + 1]]
+        keys = plan.key[plan.cu_key[i] : plan.cu_key[i + 1]]
         reconstructed[queries[:, None], keys] = True
     assert torch.equal(reconstructed, layout.dense())
     assert torch.equal(plan.query.sort().values, torch.arange(67))
@@ -32,8 +32,15 @@ def test_visibility_groups_preserve_all_edges(options):
     assert plan.max_key == int(plan.cu_key.diff().max())
 
 
-@pytest.mark.parametrize("options", [(False, False, True, True, True), (False, True, False, False, True),
-                                    (True, True, True, False, False), (True, False, True, True, True)])
+@pytest.mark.parametrize(
+    "options",
+    [
+        (False, False, True, True, True),
+        (False, True, False, False, True),
+        (True, True, True, False, False),
+        (True, False, True, True, True),
+    ],
+)
 def test_grouped_forward_and_gradients_match_dense(options):
     torch.manual_seed(174)
     layout = make_layout(*options)
@@ -43,8 +50,8 @@ def test_grouped_forward_and_gradients_match_dense(options):
     expected = scaled_dot_product_attention(q, k, v, attn_mask=layout.dense())
     actual = torch.zeros_like(q)
     for i in range(plan.cu_query.numel() - 1):
-        queries = plan.query[plan.cu_query[i]:plan.cu_query[i + 1]]
-        keys = plan.key[plan.cu_key[i]:plan.cu_key[i + 1]]
+        queries = plan.query[plan.cu_query[i] : plan.cu_query[i + 1]]
+        keys = plan.key[plan.cu_key[i] : plan.cu_key[i + 1]]
         block = scaled_dot_product_attention(q[:, :, queries], k[:, :, keys], v[:, :, keys])
         actual = actual.index_copy(2, queries, block)
     upstream = torch.randn_like(actual)
@@ -63,8 +70,12 @@ def test_joint_visibility_merges_equivalent_query_classes():
 
 
 def test_inactive_rows_keep_independent_self_edges():
-    layout = TokenLayout(torch.zeros(3, dtype=torch.long), torch.zeros(3, dtype=torch.long),
-                         torch.zeros(3, dtype=torch.long), active=torch.zeros(3, dtype=torch.bool))
+    layout = TokenLayout(
+        torch.zeros(3, dtype=torch.long),
+        torch.zeros(3, dtype=torch.long),
+        torch.zeros(3, dtype=torch.long),
+        active=torch.zeros(3, dtype=torch.bool),
+    )
     plan = visibility_groups(layout)
     assert torch.equal(plan.query, torch.arange(3))
     assert torch.equal(plan.key, plan.query)

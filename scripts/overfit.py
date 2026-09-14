@@ -6,27 +6,41 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import shutil
 import time
+from pathlib import Path
 
-import runtime_env
+# Resolve the existing environment before importing Torch or repository modules.
+import runtime_env  # noqa: F401; isort: skip
+
+# isort: split
 import torch
 import torch.distributed as dist
 from omegaconf import OmegaConf
 
-from h3.checkpoint import load_original_transformer
-from h3.distributed.fsdp import wrap_model, compile_blocks
-from h3.utils.model import canonical_name
-from h3.utils.training import parameter_groups
-from model.diffusion import WorldViewsObjective
-from pipeline.ar_inference import generate
+from h3.distributed.fsdp import compile_blocks, wrap_model
+from h3.modules.model import MiniMaxH3Transformer3DModel
+from model.diffusion import DiffusionObjective
+from pipeline.chunked_inference import generate
+from trainer.diffusion import parameter_groups
 from utils import distributed as groups
-from utils.checkpoint import save_checkpoint, load_checkpoint, rng_state, restore_rng
-from utils.config import load_config, validate_config, recipe_digest
-from verify_worldviews_runtime import sampled_weights
-from utils.tracking import Tracker
+from utils.checkpoint import load_checkpoint, restore_rng, rng_state, save_checkpoint
+from utils.config import load_config, recipe_digest, validate_config
+from utils.distributed import canonical_name
 from utils.ema import ShardedEMA
+from utils.tracking import Tracker
+
+
+def sampled_weights(model, trainable):
+    digest = hashlib.sha256()
+    for name, parameter in model.named_parameters():
+        if parameter.requires_grad == trainable and parameter.numel():
+            flat = parameter.detach().flatten()
+            count = min(32, flat.numel())
+            indices = torch.arange(count, device=flat.device) * (flat.numel() - 1) // max(count - 1, 1)
+            digest.update(name.encode())
+            digest.update(flat[indices].float().cpu().numpy().tobytes())
+    return digest.hexdigest()
 
 
 def write_json(path, value):
@@ -37,22 +51,36 @@ def write_json(path, value):
 
 def exact_state(actual, saved):
     if isinstance(saved, torch.Tensor):
-        return (isinstance(actual, torch.Tensor) and actual.dtype == saved.dtype
-                and actual.shape == saved.shape and torch.equal(actual.detach().cpu(), saved.cpu()))
+        return (
+            isinstance(actual, torch.Tensor)
+            and actual.dtype == saved.dtype
+            and actual.shape == saved.shape
+            and torch.equal(actual.detach().cpu(), saved.cpu())
+        )
     if isinstance(saved, dict):
-        return (isinstance(actual, dict) and actual.keys() == saved.keys()
-                and all(exact_state(actual[key], saved[key]) for key in saved))
+        return (
+            isinstance(actual, dict)
+            and actual.keys() == saved.keys()
+            and all(exact_state(actual[key], saved[key]) for key in saved)
+        )
     if isinstance(saved, (tuple, list)):
-        return (type(actual) is type(saved) and len(actual) == len(saved)
-                and all(exact_state(a, b) for a, b in zip(actual, saved)))
+        return (
+            type(actual) is type(saved)
+            and len(actual) == len(saved)
+            and all(exact_state(a, b) for a, b in zip(actual, saved))
+        )
     return type(actual) is type(saved) and actual == saved
 
 
 def restored_state_checks(model, optimizer, ema, saved):
-    parameters = {canonical_name(name): value for name, value in model.named_parameters() if value.requires_grad}
-    return dict(raw=exact_state(parameters, saved["weights"]),
-                adamw=exact_state(optimizer.state_dict(), saved["optimizer"]),
-                ema=exact_state(ema.state_dict() if ema is not None else None, saved["ema"]))
+    parameters = {
+        canonical_name(name): value for name, value in model.named_parameters() if value.requires_grad
+    }
+    return dict(
+        raw=exact_state(parameters, saved["weights"]),
+        adamw=exact_state(optimizer.state_dict(), saved["optimizer"]),
+        ema=exact_state(ema.state_dict() if ema is not None else None, saved["ema"]),
+    )
 
 
 def resume_evaluation_decision(raw_error, ema_error, reason=None, exact_state_by_rank=None):
@@ -61,10 +89,15 @@ def resume_evaluation_decision(raw_error, ema_error, reason=None, exact_state_by
     passed = finite and all(value <= 1e-3 for value in errors)
     diagnostic = isinstance(reason, str) and bool(reason.strip())
     state_exact = bool(exact_state_by_rank) and all(
-        all(row.get(key) is True for key in ("raw", "adamw", "ema")) for row in exact_state_by_rank)
-    return dict(status="passed" if passed else "failed", relative_tolerance=1e-3,
-                continue_training=(passed if reason is None else finite and diagnostic and state_exact),
-                diagnostic_only=diagnostic, diagnostic_reason=reason)
+        all(row.get(key) is True for key in ("raw", "adamw", "ema")) for row in exact_state_by_rank
+    )
+    return dict(
+        status="passed" if passed else "failed",
+        relative_tolerance=1e-3,
+        continue_training=(passed if reason is None else finite and diagnostic and state_exact),
+        diagnostic_only=diagnostic,
+        diagnostic_reason=reason,
+    )
 
 
 def measure(model, objective, document, device, sigma):
@@ -99,10 +132,13 @@ def generate_samples(model, documents, cfg, device, directory, label, tracker, s
         planned = []
         for index, document in enumerate(documents):
             torch.manual_seed(cfg.overfit.generation_seed + index)
-            document = WorldViewsObjective(cfg).prepare_document(document, device, training=False)
+            document = DiffusionObjective(cfg).prepare_document(document, device, training=False)
             planned.append(document)
             if groups.get_rank() == 0:
-                print(f"Generating {label} sample {index}: {cfg.sampling_steps} native sigma points per chunk", flush=True)
+                print(
+                    f"Generating {label} sample {index}: {cfg.sampling_steps} native sigma points per chunk",
+                    flush=True,
+                )
             outputs = generate(model, document, None, cfg, device)
             if not all(torch.isfinite(value).all() for value in outputs):
                 raise FloatingPointError("Nonfinite generated latents")
@@ -111,18 +147,33 @@ def generate_samples(model, documents, cfg, device, directory, label, tracker, s
                 temporary = target.with_suffix(".tmp")
                 torch.save(outputs, temporary)
                 temporary.replace(target)
-                write_json(directory / f"{label}_{index}.json", dict(
-                    step=step, seed=cfg.overfit.generation_seed + index,
-                    views=[dict(fps=view["fps"], frames=view["source_frames"],
-                                generation_chunks=(view["generation_chunks"].tolist()
-                                                   if "generation_chunks" in view else None),
-                                captions=view.get("caption_specs")) for view in document["views"]]))
+                write_json(
+                    directory / f"{label}_{index}.json",
+                    dict(
+                        step=step,
+                        seed=cfg.overfit.generation_seed + index,
+                        views=[
+                            dict(
+                                fps=view["fps"],
+                                frames=view["source_frames"],
+                                generation_chunks=(
+                                    view["generation_chunks"].tolist()
+                                    if "generation_chunks" in view
+                                    else None
+                                ),
+                                captions=view.get("caption_specs"),
+                            )
+                            for view in document["views"]
+                        ],
+                    ),
+                )
                 print(f"Saved {target}", flush=True)
         failed = torch.zeros((), dtype=torch.int32, device=device)
         if groups.get_rank() == 0:
             try:
-                from render_overfit import render_generation
-                media = render_generation(cfg, planned, directory, label, str(device))
+                from utils.visualization import write_overfit_generation
+
+                media = write_overfit_generation(cfg, planned, directory, label, str(device))
                 tracker.media(media, step, "overfit/generation")
             except Exception as error:
                 print(f"Scheduled generation output failed: {error}", flush=True)
@@ -136,30 +187,47 @@ def generate_samples(model, documents, cfg, device, directory, label, tracker, s
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/overfit.yaml")
+    parser.add_argument("--config", default="configs/overfit_diffusion_forcing.yaml")
     parser.add_argument("--features", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--stop-after", type=int, help="Save and exit at this step for a fresh-process resume check")
-    parser.add_argument("--ema-schedule-change", metavar="REASON",
-                        help="Explicitly change only the EMA schedule while retaining its saved weights and count")
-    parser.add_argument("--diagnostic-resume-after-eval-drift", metavar="REASON",
-                        help="Continue bounded overfit after exact state checks; retain failed evaluation acceptance")
+    parser.add_argument(
+        "--stop-after", type=int, help="Save and exit at this step for a fresh-process resume check"
+    )
+    parser.add_argument(
+        "--ema-schedule-change",
+        metavar="REASON",
+        help="Explicitly change only the EMA schedule while retaining its saved weights and count",
+    )
+    parser.add_argument(
+        "--diagnostic-resume-after-eval-drift",
+        metavar="REASON",
+        help="Continue bounded overfit after exact state checks; retain failed evaluation acceptance",
+    )
     parser.add_argument("opts", nargs="*")
     args = parser.parse_args()
     if args.stop_after is not None and args.stop_after <= 0:
         parser.error("--stop-after must be positive")
     cfg = validate_config(load_config(args.config, args.opts))
     if cfg.resampling_forcing and cfg.max_iters > cfg.resampling_forcing_warmup_steps:
-        raise ValueError("Use the production Trainer for RF continuation; this fixed-source probe ends during warmup")
+        raise ValueError(
+            "Use the production Trainer for RF continuation; this fixed-source probe ends during warmup"
+        )
     cfg.h3.logdir = str(args.output)
     resume = cfg.resume_ckpt
     latest = args.output / "ckpt" / "latest.json"
     if not resume and cfg.auto_resume and latest.is_file():
         resume = str(latest)
     diagnostic_reason = args.diagnostic_resume_after_eval_drift
-    if diagnostic_reason is not None and (not diagnostic_reason.strip() or not resume
-            or args.stop_after is None or args.stop_after > cfg.max_iters or args.ema_schedule_change is not None):
-        parser.error("Diagnostic resume requires a reason, checkpoint, explicit bounded --stop-after, and unchanged EMA")
+    if diagnostic_reason is not None and (
+        not diagnostic_reason.strip()
+        or not resume
+        or args.stop_after is None
+        or args.stop_after > cfg.max_iters
+        or args.ema_schedule_change is not None
+    ):
+        parser.error(
+            "Diagnostic resume requires a reason, checkpoint, explicit bounded --stop-after, and unchanged EMA"
+        )
     if resume and args.stop_after is not None:
         checkpoint = Path(resume)
         if checkpoint.name == "latest.json" and checkpoint.is_file():
@@ -168,7 +236,9 @@ def main():
         if committed_step >= args.stop_after:
             # The launcher runs a bounded phase before its normal resume.
             # Do not repeat full training when that phase is already saved.
-            print(f"Committed step {committed_step} already reaches --stop-after {args.stop_after}", flush=True)
+            print(
+                f"Committed step {committed_step} already reaches --stop-after {args.stop_after}", flush=True
+            )
             return
     torch.set_num_threads(int(os.environ.get("WORLDGEN_TORCH_NUM_THREADS", "1")))
     groups.launch_distributed_job(sp_size_arg=cfg.sp_size, fs_size_arg=cfg.fs_size)
@@ -178,8 +248,11 @@ def main():
     rank = groups.get_rank()
     torch.manual_seed(cfg.seed)
     from utils.camera import prepare_camera_geometry
-    documents = [prepare_camera_geometry(doc, cfg) for doc in
-                 torch.load(args.features / "documents.pt", map_location="cpu", weights_only=True)]
+
+    documents = [
+        prepare_camera_geometry(doc, cfg)
+        for doc in torch.load(args.features / "documents.pt", map_location="cpu", weights_only=True)
+    ]
     metadata = json.loads((args.features / "features.json").read_text())
     feature_sha256 = hashlib.sha256((args.features / "documents.pt").read_bytes()).hexdigest()
     assert metadata["status"] == "complete"
@@ -193,30 +266,40 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     if rank == 0:
         OmegaConf.save(cfg, args.output / "resolved.yaml")
-    model = load_original_transformer(cfg.h3.checkpoint, progress=print if rank == 0 else None)
+    model = MiniMaxH3Transformer3DModel.from_pretrained(
+        cfg.h3.checkpoint, progress=print if rank == 0 else None
+    )
     model.configure_attention(cfg)
-    report = dict(status="running", recipe=recipe_digest(cfg),
-                  total_parameters=sum(p.numel() for p in model.parameters()),
-                  trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad),
-                  world_size=dist.get_world_size(), source=metadata, feature_sha256=feature_sha256,
-                  evaluations=[], training=[])
+    report = dict(
+        status="running",
+        recipe=recipe_digest(cfg),
+        total_parameters=sum(p.numel() for p in model.parameters()),
+        trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad),
+        world_size=dist.get_world_size(),
+        source=metadata,
+        feature_sha256=feature_sha256,
+        evaluations=[],
+        training=[],
+    )
     assert report["total_parameters"] == 33122992896
     assert report["trainable_parameters"] == 3853523200
     model = wrap_model(model, cfg)
     compile_blocks(model.module, cfg)
     ema = ShardedEMA.from_config(model, cfg)
     report["ema_enabled"] = ema is not None
-    optimizer = torch.optim.AdamW(parameter_groups(model, cfg), betas=(cfg.beta1, cfg.beta2),
-                                  weight_decay=cfg.weight_decay, fused=True)
+    optimizer = torch.optim.AdamW(
+        parameter_groups(model, cfg), betas=(cfg.beta1, cfg.beta2), weight_decay=cfg.weight_decay, fused=True
+    )
     if cfg.optim_compile:
         optimizer.step = torch.compile(optimizer.step)
-    objective = WorldViewsObjective(cfg)
+    objective = DiffusionObjective(cfg)
     frozen, initial = sampled_weights(model, False), sampled_weights(model, True)
     first_step = 0
     exact_checks = None
     if resume:
-        restored = load_checkpoint(model, optimizer, cfg, resume, ema=ema,
-                                   ema_schedule_change=args.ema_schedule_change)
+        restored = load_checkpoint(
+            model, optimizer, cfg, resume, ema=ema, ema_schedule_change=args.ema_schedule_change
+        )
         first_step = restored["step"]
         report = restored["runtime"]["overfit_report"]
         if report["feature_sha256"] != feature_sha256 or report["source"] != metadata:
@@ -229,9 +312,14 @@ def main():
             dist.all_gather_object(exact_checks, checks)
             passed = all(all(row.values()) for row in exact_checks)
             if rank == 0:
-                write_json(args.output / f"diagnostic_state_{first_step:09d}.json",
-                           dict(status="passed" if passed else "failed", step=first_step,
-                                exact_state_by_rank=exact_checks))
+                write_json(
+                    args.output / f"diagnostic_state_{first_step:09d}.json",
+                    dict(
+                        status="passed" if passed else "failed",
+                        step=first_step,
+                        exact_state_by_rank=exact_checks,
+                    ),
+                )
             if not passed:
                 raise AssertionError(f"Diagnostic resume state is not exact: {exact_checks}")
             if not report["evaluations"] or report["evaluations"][-1]["step"] != first_step:
@@ -244,7 +332,9 @@ def main():
             previous_receipt = args.output / f"resume_{first_step:09d}.json"
             if previous_receipt.is_file():
                 previous_check = json.loads(previous_receipt.read_text())
-                if previous_check["status"] == "failed" and previous_check not in report.get("resume_checks", []):
+                if previous_check["status"] == "failed" and previous_check not in report.get(
+                    "resume_checks", []
+                ):
                     report.setdefault("resume_checks", []).append(previous_check)
         if "ema_decay_change" in restored:
             report.setdefault("initial_recipe", report["recipe"])
@@ -280,16 +370,19 @@ def main():
                 write_json(args.output / "progress.json", report)
 
         def save_progress(step):
-            checkpoint = save_checkpoint(model, optimizer, cfg, step, 1,
-                                          dict(overfit_report=report), args.output / "ckpt", ema=ema)
+            checkpoint = save_checkpoint(
+                model, optimizer, cfg, step, 1, dict(overfit_report=report), args.output / "ckpt", ema=ema
+            )
             report["checkpoint"] = str(checkpoint)
             tracker.checkpoint(checkpoint, step)
             if rank == 0:
                 print(f"Checkpoint committed at step {step}: {checkpoint}", flush=True)
                 write_json(args.output / "progress.json", report)
                 complete = sorted(p.parent for p in (args.output / "ckpt").glob("step_*/manifest.json"))
-                for old in complete[:-int(cfg.max_checkpoints)]:
-                    if old != checkpoint and str(old.resolve()) not in report.get("diagnostic_origin_checkpoints", []):
+                for old in complete[: -int(cfg.max_checkpoints)]:
+                    if old != checkpoint and str(old.resolve()) not in report.get(
+                        "diagnostic_origin_checkpoints", []
+                    ):
                         shutil.rmtree(old)
             return checkpoint
 
@@ -311,27 +404,47 @@ def main():
             continuation = torch.tensor(int(decision["continue_training"]), device=device)
             dist.all_reduce(continuation, op=dist.ReduceOp.MIN)
             decision["continue_training"] = bool(continuation.item())
-            receipt = dict(**decision, step=first_step,
-                           previous_loss=previous, restored_loss=repeated["mean_loss"], relative_error=relative_error,
-                           ema_relative_error=ema_error, ema_updates=ema.num_updates if ema else 0,
-                           ema_decay_cap=ema.decay if ema else 0.,
-                           ema_warmup=ema.warmup if ema else False,
-                           previous_evaluation=report["evaluations"][-1],
-                           restored_raw_evaluation=repeated, restored_ema_evaluation=repeated_ema)
+            receipt = dict(
+                **decision,
+                step=first_step,
+                previous_loss=previous,
+                restored_loss=repeated["mean_loss"],
+                relative_error=relative_error,
+                ema_relative_error=ema_error,
+                ema_updates=ema.num_updates if ema else 0,
+                ema_decay_cap=ema.decay if ema else 0.0,
+                ema_warmup=ema.warmup if ema else False,
+                previous_evaluation=report["evaluations"][-1],
+                restored_raw_evaluation=repeated,
+                restored_ema_evaluation=repeated_ema,
+            )
             report.setdefault("resume_checks", []).append(receipt)
             if rank == 0:
-                name = f"resume_{first_step:09d}" if diagnostic_reason is None else f"diagnostic_resume_{first_step:09d}"
+                name = (
+                    f"resume_{first_step:09d}"
+                    if diagnostic_reason is None
+                    else f"diagnostic_resume_{first_step:09d}"
+                )
                 write_json(args.output / f"{name}.json", receipt)
                 if diagnostic_reason is not None:
                     print(json.dumps(dict(diagnostic_resume=receipt)), flush=True)
                     if tracker.run:
-                        tracker.run.summary.update({"diagnostic_only": True, "production_acceptance": False,
-                                                    "resume/evaluation_passed": all(row["status"] == "passed" for row in report["resume_checks"]),
-                                                    "resume/diagnostic_reason": diagnostic_reason,
-                                                    "resume/exact_state_by_rank": exact_checks})
+                        tracker.run.summary.update(
+                            {
+                                "diagnostic_only": True,
+                                "production_acceptance": False,
+                                "resume/evaluation_passed": all(
+                                    row["status"] == "passed" for row in report["resume_checks"]
+                                ),
+                                "resume/diagnostic_reason": diagnostic_reason,
+                                "resume/exact_state_by_rank": exact_checks,
+                            }
+                        )
             if not decision["continue_training"]:
-                raise AssertionError(f"Fresh-process restored evaluation differs: raw={relative_error}, "
-                                     f"ema={ema_error}, tolerance=0.001")
+                raise AssertionError(
+                    f"Fresh-process restored evaluation differs: raw={relative_error}, "
+                    f"ema={ema_error}, tolerance=0.001"
+                )
             if rank == 0:
                 report["status"] = "running"
                 write_json(args.output / "progress.json", report)
@@ -343,7 +456,7 @@ def main():
             torch.manual_seed(cfg.seed + step)
             document = objective.prepare_document(documents[step % len(documents)], device)
             optimizer.zero_grad(set_to_none=True)
-            loss, log = objective(model, document, device, step)
+            loss, log = objective.compute_loss(model, document, device, step)
             fwd_mem = torch.cuda.memory_allocated() // 1024**2
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"Nonfinite training loss at step {step}")
@@ -353,22 +466,41 @@ def main():
                 raise FloatingPointError(f"Nonfinite gradients at step {step}")
             if cfg.warmup_steps:
                 for group in optimizer.param_groups:
-                    group["lr"] = group["initial_lr"] * min(1., (step + 1) / cfg.warmup_steps)
+                    group["lr"] = group["initial_lr"] * min(1.0, (step + 1) / cfg.warmup_steps)
             optimizer.step()
             ema_started = time.monotonic()
             if ema is not None:
                 ema.update(model)
             ema_seconds = time.monotonic() - ema_started
-            row = dict(step=step + 1, sample=step % len(documents), loss=float(loss.detach()),
-                       grad_norm=float(norm), sigma=log["sigma"], tokens=log["tokens"],
-                       sigma_min=log["sigma_min"], sigma_max=log["sigma_max"],
-                       fwd_mem=fwd_mem,
-                       ema_seconds=ema_seconds, ema_updates=ema.num_updates if ema else 0,
-                       ema_decay=ema.current_decay if ema else 0.,
-                       seconds=time.monotonic() - started)
-            row.update({key: log[key] for key in ("chunk_size_min", "chunk_size_max", "chunk_count",
-                                                "clean_prefix_chunks", "clean_video_tokens",
-                                                "supervised_video_tokens") if key in log})
+            row = dict(
+                step=step + 1,
+                sample=step % len(documents),
+                loss=float(loss.detach()),
+                grad_norm=float(norm),
+                sigma=log["sigma"],
+                tokens=log["tokens"],
+                sigma_min=log["sigma_min"],
+                sigma_max=log["sigma_max"],
+                fwd_mem=fwd_mem,
+                ema_seconds=ema_seconds,
+                ema_updates=ema.num_updates if ema else 0,
+                ema_decay=ema.current_decay if ema else 0.0,
+                seconds=time.monotonic() - started,
+            )
+            row.update(
+                {
+                    key: log[key]
+                    for key in (
+                        "chunk_size_min",
+                        "chunk_size_max",
+                        "chunk_count",
+                        "clean_prefix_chunks",
+                        "clean_video_tokens",
+                        "supervised_video_tokens",
+                    )
+                    if key in log
+                }
+            )
             report["training"].append(row)
             tracker.training(row, optimizer, document)
             if rank == 0:
@@ -380,8 +512,14 @@ def main():
                 record_evaluation(step + 1)
             if cfg.save_interval > 0 and (step + 1) % cfg.save_interval == 0 and step + 1 < cfg.max_iters:
                 save_progress(step + 1)
-            if cfg.overfit.get("generation_interval", 0) and (step + 1) % cfg.overfit.generation_interval == 0 and step + 1 < cfg.max_iters:
-                generate_samples(model, documents, cfg, device, args.output, f"step{step + 1:09d}", tracker, step + 1)
+            if (
+                cfg.overfit.get("generation_interval", 0)
+                and (step + 1) % cfg.overfit.generation_interval == 0
+                and step + 1 < cfg.max_iters
+            ):
+                generate_samples(
+                    model, documents, cfg, device, args.output, f"step{step + 1:09d}", tracker, step + 1
+                )
             if args.stop_after == step + 1 and step + 1 < cfg.max_iters:
                 if not cfg.save_interval or (step + 1) % cfg.save_interval:
                     save_progress(step + 1)
@@ -395,34 +533,59 @@ def main():
         generate_samples(model, documents, cfg, device, args.output, "after", tracker, cfg.max_iters)
         if ema is not None:
             with ema.average_parameters(model):
-                generate_samples(model, documents, cfg, device, args.output, "after_ema", tracker, cfg.max_iters)
+                generate_samples(
+                    model, documents, cfg, device, args.output, "after_ema", tracker, cfg.max_iters
+                )
         baseline, final = report["evaluations"][0], report["evaluations"][-1]
         improvement = 1 - final["mean_loss"] / baseline["mean_loss"]
         report["relative_improvement"] = improvement
         report["loss_criterion_passed"] = improvement >= cfg.overfit.minimum_relative_improvement
         if ema is not None:
             report["ema_relative_improvement"] = 1 - final["ema_mean_loss"] / baseline["ema_mean_loss"]
-            report["ema_loss_criterion_passed"] = report["ema_relative_improvement"] >= cfg.overfit.minimum_relative_improvement
-        report["peak_allocated_gib"] = max(tracker.peak_allocated, torch.cuda.max_memory_allocated()) / 1024**3
+            report["ema_loss_criterion_passed"] = (
+                report["ema_relative_improvement"] >= cfg.overfit.minimum_relative_improvement
+            )
+        report["peak_allocated_gib"] = (
+            max(tracker.peak_allocated, torch.cuda.max_memory_allocated()) / 1024**3
+        )
         report["status"] = "training_and_generation_complete"
         if rank == 0:
             write_json(args.output / "training_report.json", report)
-            from render_overfit import render_run
-            review = render_run(cfg, args.features, args.output, str(device))
+            from utils.visualization import write_overfit_comparison
+
+            review = write_overfit_comparison(cfg, args.features, args.output, str(device))
             tracker.media(args.output / "review", cfg.max_iters, "overfit")
             if tracker.run:
-                tracker.run.summary.update({"relative_improvement": improvement, "loss_criterion_passed": report["loss_criterion_passed"],
-                                           "frozen_samples_unchanged": True, "review/path": str((args.output / "review").resolve())})
-            write_json(args.output / "completion.json", dict(status="complete", training=report["status"], review=review["status"],
-                       diagnostic_only=report.get("diagnostic_only", False),
-                       resume_evaluation_passed=all(row["status"] == "passed" for row in report.get("resume_checks", []))))
+                tracker.run.summary.update(
+                    {
+                        "relative_improvement": improvement,
+                        "loss_criterion_passed": report["loss_criterion_passed"],
+                        "frozen_samples_unchanged": True,
+                        "review/path": str((args.output / "review").resolve()),
+                    }
+                )
+            write_json(
+                args.output / "completion.json",
+                dict(
+                    status="complete",
+                    training=report["status"],
+                    review=review["status"],
+                    diagnostic_only=report.get("diagnostic_only", False),
+                    resume_evaluation_passed=all(
+                        row["status"] == "passed" for row in report.get("resume_checks", [])
+                    ),
+                ),
+            )
             write_json(args.output / "progress.json", report)
             print(json.dumps(dict(status=report["status"], relative_improvement=improvement)), flush=True)
             success = True
         groups.shutdown_distributed()
     except BaseException as error:
-        report.update(status="failed", error=f"{type(error).__name__}: {error}",
-                      completed_training_step=report["training"][-1]["step"] if report["training"] else first_step)
+        report.update(
+            status="failed",
+            error=f"{type(error).__name__}: {error}",
+            completed_training_step=report["training"][-1]["step"] if report["training"] else first_step,
+        )
         if rank == 0:
             write_json(args.output / "progress.json", report)
         raise

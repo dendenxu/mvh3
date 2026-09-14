@@ -18,10 +18,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from h3.modules.layers import FeedForward
+from h3.checkpoint import load_local_model
 from h3.modules.attention import dispatch_attention_fn
-from h3.utils.model import model_config, get_parameter_dtype, set_gradient_checkpointing, load_local_model
+from h3.modules.layers import FeedForward, get_parameter_dtype, set_gradient_checkpointing
 from h3.modules.vae_distribution import AutoencoderKLOutput, DecoderOutput, DiagonalGaussianDistribution
+from utils.config import model_config
 
 
 class MiniMaxH3VideoCausalConv3d(nn.Conv3d):
@@ -50,11 +51,14 @@ class MiniMaxH3VideoCausalConv3d(nn.Conv3d):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.spatial_padding > 0:
             padding = self.spatial_padding
-            hidden_states = F.pad(hidden_states, (padding, padding, padding, padding, 0, 0),
-                                  mode=self.spatial_padding_mode)
+            hidden_states = F.pad(
+                hidden_states, (padding, padding, padding, padding, 0, 0), mode=self.spatial_padding_mode
+            )
         if self.temporal_padding > 0:
             hidden_states = F.pad(hidden_states, (0, 0, 0, 0, self.temporal_padding, 0), mode="constant")
-        return F.conv3d(hidden_states, self.weight, self.bias, stride=self.stride, padding=0, dilation=self.dilation)
+        return F.conv3d(
+            hidden_states, self.weight, self.bias, stride=self.stride, padding=0, dilation=self.dilation
+        )
 
 
 class MiniMaxH3VideoGroupNorm(nn.GroupNorm):
@@ -166,33 +170,38 @@ class MiniMaxH3VideoDownBlock3d(nn.Module):
         spatial_padding_mode: str = "reflect",
     ) -> None:
         super().__init__()
-        self.resnets = nn.ModuleList([
-            MiniMaxH3VideoResnetBlock3d(
-                in_channels=in_channels if i == 0 else out_channels,
-                out_channels=out_channels,
-                norm_num_groups=norm_num_groups,
-                norm_eps=norm_eps,
-                spatial_padding_mode=spatial_padding_mode,
-            ) for i in range(num_layers)
-        ])
-        self.downsamplers = None
-        if temporal_downsample_factor * spatial_downsample_factor > 1:
-            self.downsamplers = nn.ModuleList([
-                MiniMaxH3VideoDownsample3d(
-                    out_channels,
-                    out_channels,
-                    temporal_stride=temporal_downsample_factor,
-                    spatial_stride=spatial_downsample_factor,
+        self.resnets = nn.ModuleList(
+            [
+                MiniMaxH3VideoResnetBlock3d(
+                    in_channels=in_channels if i == 0 else out_channels,
+                    out_channels=out_channels,
+                    norm_num_groups=norm_num_groups,
+                    norm_eps=norm_eps,
                     spatial_padding_mode=spatial_padding_mode,
                 )
-            ])
+                for i in range(num_layers)
+            ]
+        )
+        self.downsamplers = None
+        if temporal_downsample_factor * spatial_downsample_factor > 1:
+            self.downsamplers = nn.ModuleList(
+                [
+                    MiniMaxH3VideoDownsample3d(
+                        out_channels,
+                        out_channels,
+                        temporal_stride=temporal_downsample_factor,
+                        spatial_stride=spatial_downsample_factor,
+                        spatial_padding_mode=spatial_padding_mode,
+                    )
+                ]
+            )
 
         self.gradient_checkpointing = False
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         for resnet in self.resnets:
             if torch.is_grad_enabled() and self.gradient_checkpointing:
-                hidden_states = self._gradient_checkpointing_func(resnet, hidden_states)
+                hidden_states = self.gradient_checkpointing_func(resnet, hidden_states)
             else:
                 hidden_states = resnet(hidden_states)
         if self.downsamplers is not None:
@@ -230,21 +239,26 @@ class MiniMaxH3VideoEncoder3d(nn.Module):
             spatial_padding_mode=spatial_padding_mode,
         )
 
-        block_in_channels = (block_out_channels[0], ) + tuple(block_out_channels[:-1])
-        self.down_blocks = nn.ModuleList([
-            MiniMaxH3VideoDownBlock3d(
-                in_channels=block_in_channels[i],
-                out_channels=block_out_channels[i],
-                num_layers=layers_per_block,
-                temporal_downsample_factor=temporal_downsample_factors[i],
-                spatial_downsample_factor=spatial_downsample_factors[i],
-                norm_num_groups=norm_num_groups,
-                norm_eps=norm_eps,
-                spatial_padding_mode=spatial_padding_mode,
-            ) for i in range(len(block_out_channels))
-        ])
+        block_in_channels = (block_out_channels[0],) + tuple(block_out_channels[:-1])
+        self.down_blocks = nn.ModuleList(
+            [
+                MiniMaxH3VideoDownBlock3d(
+                    in_channels=block_in_channels[i],
+                    out_channels=block_out_channels[i],
+                    num_layers=layers_per_block,
+                    temporal_downsample_factor=temporal_downsample_factors[i],
+                    spatial_downsample_factor=spatial_downsample_factors[i],
+                    norm_num_groups=norm_num_groups,
+                    norm_eps=norm_eps,
+                    spatial_padding_mode=spatial_padding_mode,
+                )
+                for i in range(len(block_out_channels))
+            ]
+        )
 
-        self.norm_out = MiniMaxH3VideoGroupNorm(norm_num_groups, block_out_channels[-1], eps=norm_eps, affine=True)
+        self.norm_out = MiniMaxH3VideoGroupNorm(
+            norm_num_groups, block_out_channels[-1], eps=norm_eps, affine=True
+        )
         self.conv_out = MiniMaxH3VideoCausalConv3d(
             block_out_channels[-1],
             out_channels,
@@ -274,12 +288,13 @@ class MiniMaxH3VideoRotaryPosEmbed(nn.Module):
         if dim % (2 * num_axes) != 0:
             raise ValueError(f"`dim` {dim} must be divisible by `2 * num_axes` {2 * num_axes}.")
         self.dim, self.theta, self.num_axes = dim, theta, num_axes
-        inv_freq = 1.0 / theta**torch.arange(0, 1, 2 * num_axes / dim, dtype=torch.float32)
+        inv_freq = 1.0 / theta ** torch.arange(0, 1, 2 * num_axes / dim, dtype=torch.float32)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def reset_parameters(self):
-        self.inv_freq = 1.0 / self.theta**torch.arange(
-            0, 1, 2 * self.num_axes / self.dim, dtype=torch.float32, device="cpu")
+        self.inv_freq = 1.0 / self.theta ** torch.arange(
+            0, 1, 2 * self.num_axes / self.dim, dtype=torch.float32, device="cpu"
+        )
 
     def forward(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         angles = 2.0 * math.pi * position_ids[:, :, :, None] * self.inv_freq[None, None, None, :]
@@ -355,9 +370,9 @@ class MiniMaxH3VideoAttention(nn.Module):
 
         self.set_processor(MiniMaxH3VideoAttnProcessor())
 
-    def forward(self,
-                hidden_states: torch.Tensor,
-                rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None
+    ) -> torch.Tensor:
         return self.processor(self, hidden_states, rotary_emb)
 
 
@@ -380,9 +395,9 @@ class MiniMaxH3VideoTransformerBlock(nn.Module):
         self.ff = FeedForward(dim, mult=ffn_mult, activation_fn="swiglu", bias=bias)
         self.scale2 = nn.Parameter(torch.zeros(dim))
 
-    def forward(self,
-                hidden_states: torch.Tensor,
-                rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None
+    ) -> torch.Tensor:
         # The reference normalizes in float32 regardless of the compute dtype.
         norm_hidden_states = self.norm1(hidden_states.float()).to(hidden_states.dtype)
         hidden_states = hidden_states + self.attn(norm_hidden_states, rotary_emb) * self.scale1
@@ -423,15 +438,18 @@ class MiniMaxH3VideoViTDecoder3d(nn.Module):
         self.rope = MiniMaxH3VideoRotaryPosEmbed(int(attention_head_dim * rope_dim_ratio), theta=rope_theta)
         self.proj_in = nn.Linear(in_channels, dim)
         self.register_tokens = nn.Parameter(torch.zeros(1, num_register_tokens, dim))
-        self.transformer_blocks = nn.ModuleList([
-            MiniMaxH3VideoTransformerBlock(
-                dim=dim,
-                heads=num_attention_heads,
-                dim_head=attention_head_dim,
-                ffn_mult=ffn_mult,
-                eps=norm_eps,
-            ) for _ in range(num_layers)
-        ])
+        self.transformer_blocks = nn.ModuleList(
+            [
+                MiniMaxH3VideoTransformerBlock(
+                    dim=dim,
+                    heads=num_attention_heads,
+                    dim_head=attention_head_dim,
+                    ffn_mult=ffn_mult,
+                    eps=norm_eps,
+                )
+                for _ in range(num_layers)
+            ]
+        )
         self.norm_out = nn.LayerNorm(dim, elementwise_affine=True, eps=norm_eps)
         self.proj_out = nn.Linear(dim, out_channels * patch_size_t * patch_size * patch_size)
 
@@ -440,8 +458,9 @@ class MiniMaxH3VideoViTDecoder3d(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, num_channels, num_frames, height, width = hidden_states.shape
 
-        hidden_states = hidden_states.permute(0, 2, 3, 4, 1).reshape(batch_size, num_frames * height * width,
-                                                                     num_channels)
+        hidden_states = hidden_states.permute(0, 2, 3, 4, 1).reshape(
+            batch_size, num_frames * height * width, num_channels
+        )
         hidden_states = self.proj_in(hidden_states)
         num_patches = hidden_states.shape[1]
 
@@ -461,7 +480,7 @@ class MiniMaxH3VideoViTDecoder3d(nn.Module):
 
         for block in self.transformer_blocks:
             if torch.is_grad_enabled() and self.gradient_checkpointing:
-                hidden_states = self._gradient_checkpointing_func(block, hidden_states, rotary_emb)
+                hidden_states = self.gradient_checkpointing_func(block, hidden_states, rotary_emb)
             else:
                 hidden_states = block(hidden_states, rotary_emb)
 
@@ -513,14 +532,7 @@ class AutoencoderKLMiniMaxH3(nn.Module):
     changes the output. Use `enable_tiling` to change the tile geometry, `disable_tiling` to turn it off.
     """
 
-    _supports_gradient_checkpointing = True
-    _no_split_modules = ["MiniMaxH3VideoResnetBlock3d", "MiniMaxH3VideoTransformerBlock"]
-    _repeated_blocks = ["MiniMaxH3VideoTransformerBlock"]
-    _skip_layerwise_casting_patterns = ["norm"]
-    # The released checkpoint is float32 and the verified decode recipe is float16 *autocast over float32 weights*
-    # (see `decode`). A pipeline-level `torch_dtype=torch.bfloat16` must therefore not downcast the weights, so every
-    # top-level module is pinned, mirroring the transformer's mixed-precision contract.
-    _keep_in_fp32_modules = ["encoder", "decoder", "quant_conv", "post_quant_conv"]
+    # The released video VAE loads and computes in FP32.
 
     def __init__(
         self,
@@ -544,8 +556,8 @@ class AutoencoderKLMiniMaxH3(nn.Module):
         decoder_norm_eps: float = 1e-5,
         clip_length: int = 17,
         token_drop: int = 3,
-        latents_mean: tuple[float, ...] = (0.0, ) * 24,
-        latents_std: tuple[float, ...] = (1.0, ) * 24,
+        latents_mean: tuple[float, ...] = (0.0,) * 24,
+        latents_std: tuple[float, ...] = (1.0,) * 24,
     ) -> None:
         super().__init__()
         self.config = model_config(locals())
@@ -587,7 +599,9 @@ class AutoencoderKLMiniMaxH3(nn.Module):
         self.frame_pre_padding = (-clip_length) % self.temporal_compression_ratio
         self.tokens_chunk_size = math.ceil(clip_length / self.temporal_compression_ratio)
         self.token_overlap = (-token_drop) % self.tokens_chunk_size
-        self.frame_overlap = max(self.token_overlap * self.temporal_compression_ratio - self.frame_pre_padding, 0)
+        self.frame_overlap = max(
+            self.token_overlap * self.temporal_compression_ratio - self.frame_pre_padding, 0
+        )
 
         # When decoding a batch of video latents at a time, one can save memory by slicing across the batch dimension
         # to perform decoding of a single video latent at a time.
@@ -646,10 +660,16 @@ class AutoencoderKLMiniMaxH3(nn.Module):
         self.use_tiling = True
         self.tile_sample_min_height = tile_sample_min_height or self.tile_sample_min_height
         self.tile_sample_min_width = tile_sample_min_width or self.tile_sample_min_width
-        self.tile_sample_min_overlap_height = tile_sample_min_overlap_height or self.tile_sample_min_overlap_height
-        self.tile_sample_min_overlap_width = tile_sample_min_overlap_width or self.tile_sample_min_overlap_width
+        self.tile_sample_min_overlap_height = (
+            tile_sample_min_overlap_height or self.tile_sample_min_overlap_height
+        )
+        self.tile_sample_min_overlap_width = (
+            tile_sample_min_overlap_width or self.tile_sample_min_overlap_width
+        )
 
-    def _split_tiles(self, length: int, tile_size: int, min_overlap: int) -> tuple[list[int], list[int], list[int]]:
+    def split_tiles(
+        self, length: int, tile_size: int, min_overlap: int
+    ) -> tuple[list[int], list[int], list[int]]:
         r"""
         Lay `tile_size`-wide tiles over `length` pixels. The number of tiles is the smallest one whose union can cover
         `length` while keeping every overlap at least `min_overlap`; the slack is then distributed round-robin over the
@@ -672,7 +692,7 @@ class AutoencoderKLMiniMaxH3(nn.Module):
             tile_start_indices.append(tile_start_indices[-1] + tile_size - overlaps[i])
         return tile_start_indices, [tile_size] * num_tiles, overlaps
 
-    def _blend(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int, dim: int) -> torch.Tensor:
+    def blend(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int, dim: int) -> torch.Tensor:
         blend_extent = min(a.shape[dim], b.shape[dim], blend_extent)
         positions = torch.arange(blend_extent, device=b.device, dtype=b.dtype)
         shape = [1] * a.ndim
@@ -692,7 +712,7 @@ class AutoencoderKLMiniMaxH3(nn.Module):
         slice_rest[dim] = slice(blend_extent, None)
         return torch.cat([blended, b[tuple(slice_rest)]], dim=dim)
 
-    def _stitch_tiles(
+    def stitch_tiles(
         self,
         tiles: list[list[torch.Tensor]],
         height_overlaps: list[int],
@@ -703,41 +723,43 @@ class AutoencoderKLMiniMaxH3(nn.Module):
             result_row = []
             for j, tile in enumerate(row):
                 if i > 0:
-                    tile = self._blend(tiles[i - 1][j], tile, height_overlaps[i - 1], dim=-2)
+                    tile = self.blend(tiles[i - 1][j], tile, height_overlaps[i - 1], dim=-2)
                 if j > 0:
-                    tile = self._blend(row[j - 1], tile, width_overlaps[j - 1], dim=-1)
+                    tile = self.blend(row[j - 1], tile, width_overlaps[j - 1], dim=-1)
                 if i < len(tiles) - 1:
-                    tile = tile[..., :-height_overlaps[i], :]
+                    tile = tile[..., : -height_overlaps[i], :]
                 if j < len(row) - 1:
-                    tile = tile[..., :, :-width_overlaps[j]]
+                    tile = tile[..., :, : -width_overlaps[j]]
                 result_row.append(tile)
             result_rows.append(torch.cat(result_row, dim=-1))
         return torch.cat(result_rows, dim=-2)
 
-    def _encode_clip(self, x: torch.Tensor) -> torch.Tensor:
+    def encode_clip(self, x: torch.Tensor) -> torch.Tensor:
         r"""Encode one temporal clip, spatially tiled when tiling is enabled."""
         if not self.use_tiling:
             return self.quant_conv(self.encoder(x))
 
         height, width = x.shape[-2], x.shape[-1]
-        y_indices, y_lengths, y_overlaps = self._split_tiles(height, self.tile_sample_min_height,
-                                                             self.tile_sample_min_overlap_height)
-        x_indices, x_lengths, x_overlaps = self._split_tiles(width, self.tile_sample_min_width,
-                                                             self.tile_sample_min_overlap_width)
+        y_indices, y_lengths, y_overlaps = self.split_tiles(
+            height, self.tile_sample_min_height, self.tile_sample_min_overlap_height
+        )
+        x_indices, x_lengths, x_overlaps = self.split_tiles(
+            width, self.tile_sample_min_width, self.tile_sample_min_overlap_width
+        )
 
         rows = []
         for i_pos, i_len in zip(y_indices, y_lengths):
             row = []
             for j_pos, j_len in zip(x_indices, x_lengths):
-                tile = x[..., i_pos:i_pos + i_len, j_pos:j_pos + j_len]
+                tile = x[..., i_pos : i_pos + i_len, j_pos : j_pos + j_len]
                 row.append(self.quant_conv(self.encoder(tile)))
             rows.append(row)
 
         latent_y_overlaps = [overlap // self.spatial_compression_ratio for overlap in y_overlaps]
         latent_x_overlaps = [overlap // self.spatial_compression_ratio for overlap in x_overlaps]
-        return self._stitch_tiles(rows, latent_y_overlaps, latent_x_overlaps)
+        return self.stitch_tiles(rows, latent_y_overlaps, latent_x_overlaps)
 
-    def _decode_clip(self, z: torch.Tensor) -> torch.Tensor:
+    def decode_clip(self, z: torch.Tensor) -> torch.Tensor:
         r"""Decode one temporal clip, spatially tiled when tiling is enabled."""
         if not self.use_tiling:
             return self.decoder(self.post_quant_conv(z))
@@ -745,10 +767,12 @@ class AutoencoderKLMiniMaxH3(nn.Module):
         # Tiles are laid out in pixel space and then mapped back onto the latent grid.
         height = z.shape[-2] * self.spatial_compression_ratio
         width = z.shape[-1] * self.spatial_compression_ratio
-        y_indices, y_lengths, y_overlaps = self._split_tiles(height, self.tile_sample_min_height,
-                                                             self.tile_sample_min_overlap_height)
-        x_indices, x_lengths, x_overlaps = self._split_tiles(width, self.tile_sample_min_width,
-                                                             self.tile_sample_min_overlap_width)
+        y_indices, y_lengths, y_overlaps = self.split_tiles(
+            height, self.tile_sample_min_height, self.tile_sample_min_overlap_height
+        )
+        x_indices, x_lengths, x_overlaps = self.split_tiles(
+            width, self.tile_sample_min_width, self.tile_sample_min_overlap_width
+        )
 
         ratio = self.spatial_compression_ratio
         rows = []
@@ -757,15 +781,15 @@ class AutoencoderKLMiniMaxH3(nn.Module):
             for j_pos, j_len in zip(x_indices, x_lengths):
                 tile = z[
                     ...,
-                    i_pos // ratio:i_pos // ratio + i_len // ratio,
-                    j_pos // ratio:j_pos // ratio + j_len // ratio,
+                    i_pos // ratio : i_pos // ratio + i_len // ratio,
+                    j_pos // ratio : j_pos // ratio + j_len // ratio,
                 ]
                 row.append(self.decoder(self.post_quant_conv(tile)))
             rows.append(row)
 
-        return self._stitch_tiles(rows, y_overlaps, x_overlaps)
+        return self.stitch_tiles(rows, y_overlaps, x_overlaps)
 
-    def _encode(self, x: torch.Tensor) -> torch.Tensor:
+    def encode_video(self, x: torch.Tensor) -> torch.Tensor:
         r"""
         Encode a video in `clip_length`-frame chunks and drop the `token_drop` trailing latent frames.
 
@@ -777,23 +801,23 @@ class AutoencoderKLMiniMaxH3(nn.Module):
         clip_length = self.config.clip_length
         num_frames = x.shape[2]
         if num_frames == 1:
-            return self._encode_clip(x)
+            return self.encode_clip(x)
         if num_frames % clip_length != 0:
             pad_frames = x[:, :, -1:].repeat(1, 1, (-num_frames) % clip_length, 1, 1)
             x = torch.cat([x, pad_frames], dim=2)
 
         moments = torch.cat(
             [
-                self._encode_clip(x[:, :, i * clip_length:(i + 1) * clip_length])
+                self.encode_clip(x[:, :, i * clip_length : (i + 1) * clip_length])
                 for i in range(x.shape[2] // clip_length)
             ],
             dim=2,
         )
         if self.config.token_drop > 0:
-            moments = moments[:, :, :-self.config.token_drop]
+            moments = moments[:, :, : -self.config.token_drop]
         return moments
 
-    def _decode(self, z: torch.Tensor) -> torch.Tensor:
+    def decode_video(self, z: torch.Tensor) -> torch.Tensor:
         r"""
         Decode a latent video, mirroring the chunking that `_encode` applied.
 
@@ -807,7 +831,7 @@ class AutoencoderKLMiniMaxH3(nn.Module):
         if z.shape[2] < minimum:
             frames = 1 + max(z.shape[2] - 1, 0) * self.temporal_compression_ratio
             padded = torch.cat((z, z[:, :, -1:].expand(-1, -1, minimum - z.shape[2], -1, -1)), dim=2)
-            return self._decode(padded)[:, :, :frames]
+            return self.decode_video(padded)[:, :, :frames]
         tokens_chunk_size = self.tokens_chunk_size
         token_drop = self.config.token_drop
         temporal_ratio = self.temporal_compression_ratio
@@ -823,14 +847,14 @@ class AutoencoderKLMiniMaxH3(nn.Module):
         overlap = None
         for i in range(num_chunks):
             start = i * tokens_chunk_size
-            clip = self._decode_clip(z[:, :, start:start + tokens_chunk_size + self.token_overlap])
+            clip = self.decode_clip(z[:, :, start : start + tokens_chunk_size + self.token_overlap])
             for j in range(int(token_drop > 0) + 1):
                 frame_start = j * chunk_num_frames
-                chunk = clip[:, :, frame_start:frame_start + chunk_num_frames]
-                chunk = chunk[:, :, self.frame_pre_padding:]
+                chunk = clip[:, :, frame_start : frame_start + chunk_num_frames]
+                chunk = chunk[:, :, self.frame_pre_padding :]
                 if j == 0:
                     if overlap is not None:
-                        chunk = self._blend(overlap, chunk, self.frame_overlap, dim=-3)
+                        chunk = self.blend(overlap, chunk, self.frame_overlap, dim=-3)
                     decoded_chunks.append(chunk)
                 else:
                     overlap = chunk
@@ -845,8 +869,13 @@ class AutoencoderKLMiniMaxH3(nn.Module):
             intra_tail = self.config.clip_length % temporal_ratio
             num_tokens_before_pad = z.shape[2] - pad_tokens
             pad_frames = sum(
-                intra_tail if intra_tail and (num_tokens_before_pad + k) % tokens_chunk_size == 0 else temporal_ratio
-                for k in range(pad_tokens))
+                (
+                    intra_tail
+                    if intra_tail and (num_tokens_before_pad + k) % tokens_chunk_size == 0
+                    else temporal_ratio
+                )
+                for k in range(pad_tokens)
+            )
             dec = dec[:, :, :-pad_frames]
         return dec
 
@@ -865,16 +894,16 @@ class AutoencoderKLMiniMaxH3(nn.Module):
             The latent distribution of the encoded videos. Note that MiniMax-H3 normalizes the sampled latents with
             `latents_mean` / `latents_std` afterwards.
         """
-        # Every module is pinned to float32 by `_keep_in_fp32_modules`, so a pipeline running in a lower `torch_dtype`
+        # Every module is pinned to float32 by the released checkpoint dtype policy, so a pipeline running in a lower `torch_dtype`
         # hands over lower-precision pixels; align them with the weights, like the audio autoencoder does.
         x = x.to(get_parameter_dtype(self.encoder))
         if self.use_slicing and x.shape[0] > 1:
-            moments = torch.cat([self._encode(x_slice) for x_slice in x.split(1)])
+            moments = torch.cat([self.encode_video(x_slice) for x_slice in x.split(1)])
         else:
-            moments = self._encode(x)
+            moments = self.encode_video(x)
         posterior = DiagonalGaussianDistribution(moments)
         if not return_dict:
-            return (posterior, )
+            return (posterior,)
         return AutoencoderKLOutput(latent_dist=posterior)
 
     def decode(self, z: torch.Tensor, return_dict: bool = True) -> DecoderOutput | tuple[torch.Tensor]:
@@ -893,11 +922,11 @@ class AutoencoderKLMiniMaxH3(nn.Module):
         """
         z = z.to(get_parameter_dtype(self.decoder))
         if self.use_slicing and z.shape[0] > 1:
-            decoded = torch.cat([self._decode(z_slice) for z_slice in z.split(1)])
+            decoded = torch.cat([self.decode_video(z_slice) for z_slice in z.split(1)])
         else:
-            decoded = self._decode(z)
+            decoded = self.decode_video(z)
         if not return_dict:
-            return (decoded, )
+            return (decoded,)
         return DecoderOutput(sample=decoded)
 
     def forward(

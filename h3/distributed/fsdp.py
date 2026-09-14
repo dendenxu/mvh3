@@ -4,7 +4,9 @@ from functools import partial
 from pathlib import Path
 
 import torch
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, CPUOffload, MixedPrecision, ShardingStrategy
+from torch.distributed.fsdp import CPUOffload
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 from torch.utils.checkpoint import checkpoint
 
 from utils import distributed as groups
@@ -18,19 +20,28 @@ def fsdp_options(cfg, mixed=True, text=False):
         sharding_strategy={
             "hybrid_full": ShardingStrategy.HYBRID_SHARD,
             "full": ShardingStrategy.FULL_SHARD,
-            "no_shard": ShardingStrategy.NO_SHARD
+            "no_shard": ShardingStrategy.NO_SHARD,
         }[strategy],
         device_mesh=groups.device_mesh,
         device_id=torch.cuda.current_device(),
         use_orig_params=True,
         limit_all_gathers=True,
         forward_prefetch=cfg.forward_prefetch,
-        cpu_offload=CPUOffload(offload_params=cfg.text_encoder_cpu_offload if text else cfg.generator_cpu_offload),
-        mixed_precision=MixedPrecision(param_dtype=torch.bfloat16,
-                                       reduce_dtype=torch.float32,
-                                       buffer_dtype=torch.float32,
-                                       cast_forward_inputs=False,
-                                       cast_root_forward_inputs=False) if mixed and cfg.mixed_precision else None)
+        cpu_offload=CPUOffload(
+            offload_params=cfg.text_encoder_cpu_offload if text else cfg.generator_cpu_offload
+        ),
+        mixed_precision=(
+            MixedPrecision(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.float32,
+                buffer_dtype=torch.float32,
+                cast_forward_inputs=False,
+                cast_root_forward_inputs=False,
+            )
+            if mixed and cfg.mixed_precision
+            else None
+        ),
+    )
 
 
 def wrap_model(model, cfg):
@@ -57,16 +68,21 @@ def wrap_model(model, cfg):
 
 def wrap_text(encoder, cfg):
     from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
-    return FSDP(encoder,
-                auto_wrap_policy=partial(size_based_auto_wrap_policy, min_num_params=50_000_000),
-                **fsdp_options(cfg, text=True))
+
+    return FSDP(
+        encoder,
+        auto_wrap_policy=partial(size_based_auto_wrap_policy, min_num_params=50_000_000),
+        **fsdp_options(cfg, text=True),
+    )
 
 
 def compile_blocks(model, cfg):
     # H3's shape pool changes sequence lengths, text lengths and device scopes.
     # An exhausted guard cache must never cause eager quadratic flex attention.
     torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 256)
-    torch._dynamo.config.accumulated_recompile_limit = max(torch._dynamo.config.accumulated_recompile_limit, 4096)
+    torch._dynamo.config.accumulated_recompile_limit = max(
+        torch._dynamo.config.accumulated_recompile_limit, 4096
+    )
     torch._dynamo.config.automatic_dynamic_shapes = False
     # Preserve native BF16 rounding at casts even when a camera overlay makes
     # a different fusion graph. Otherwise an identity camera changes the output.
@@ -98,7 +114,8 @@ def compile_blocks(model, cfg):
 
 
 def save_compile_cache(directory):
-    from utils.compile import current_snapshot, atomic_write
+    from utils.compile import atomic_write, current_snapshot
+
     data, _ = current_snapshot()
     if data:
         path = Path(directory)
@@ -107,7 +124,8 @@ def save_compile_cache(directory):
 
 
 def load_compile_cache(directory):
-    from utils.compile import union_fold, reregister, CacheArtifactManager
+    from utils.compile import CacheArtifactManager, reregister, union_fold
+
     path = Path(directory) / f"rank{groups.get_rank()}.bin"
     if path.is_file():
         union = union_fold([path.read_bytes()])

@@ -1,77 +1,104 @@
 #!/usr/bin/env python3
-"""Prepare fixed real monocular documents using the production H3 encoder."""
+"""Reuse exact video features and encode all contiguous caption combinations."""
 
 import argparse
+import hashlib
 import json
+import shutil
+from functools import partial
 from pathlib import Path
 
-import runtime_env
-import torch
-from omegaconf import OmegaConf
+# Resolve the existing environment before importing Torch or repository modules.
+import runtime_env  # noqa: F401; isort: skip
 
-from dataset.mvgame import select_pose_stable_factor
-from h3.data import read_parquet_clip
-from h3.modules.camera import camera_projection
-from utils.config import load_config, validate_config
-from utils.h3_wrapper import VideoEncoder
+# isort: split
+import pyarrow as pa
+import pyarrow.parquet as pq
+import torch
+
+from h3.distributed.fsdp import wrap_text
+from h3.encoders import TextEncoder
+from utils import distributed as groups
+from utils.config import load_config
+
+
+def read_rows(path, indices):
+    parquet = pq.ParquetFile(path)
+    found, offset = {}, 0
+    for group in range(parquet.metadata.num_row_groups):
+        count = parquet.metadata.row_group(group).num_rows
+        selected = [i for i in indices if offset <= i < offset + count]
+        if selected:
+            table = parquet.read_row_group(group)
+            for i in selected:
+                found[i] = table.slice(i - offset, 1)
+        offset += count
+    return pa.concat_tables([found[i] for i in indices])
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/overfit.yaml")
+    parser.add_argument("--features", type=Path, required=True)
     parser.add_argument("--parquet", type=Path, required=True)
-    parser.add_argument("--text-from", type=Path, required=True,
-                        help="Verified full-Qwen features for the identical source caption")
+    parser.add_argument("--row", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--config", default="configs/overfit_diffusion_forcing.yaml")
     args = parser.parse_args()
-    torch.set_num_threads(4)
-    cfg = validate_config(load_config(args.config))
-    args.output.mkdir(parents=True, exist_ok=True)
-    clip = read_parquet_clip(args.parquet, cfg.overfit.row, list(cfg.overfit.views),
-                             cfg.overfit.frames, fps=cfg.dataset.model_fps,
-                             height=cfg.dataset.height, width=cfg.dataset.width)
-    previous = json.loads((args.text_from / "features.json").read_text())
-    if (previous["status"] != "complete" or previous["caption"] != clip["caption"]
-            or Path(previous["checkpoint"]).resolve() != Path(cfg.h3.checkpoint).resolve()
-            or previous["text_layer"] != 50):
-        raise ValueError("Text reuse requires the same full encoder and exact source caption")
-    text = torch.load(args.text_from / "short_mono.pt", map_location="cpu", weights_only=True)["prompt_embeds"]
-    assert text.shape[-1] == 5120 and torch.isfinite(text).all()
-    poses = clip["pose"].float().clone()
-    poses[..., 2:4] -= .5
-    scale, diameter = select_pose_stable_factor(poses[..., 7:10].reshape(-1, 3), cfg.dataset.pose_stable_factors)
-    poses[..., 7:10] /= scale
-    video = VideoEncoder(cfg.h3.vae, args.device)
-    documents = []
-    for i, (pixels, pose) in enumerate(zip(clip["pixels"], poses)):
-        pixels = pixels[0].permute(1, 0, 2, 3)
-        matrix = camera_projection(pose[None])
-        raw = dict(views=[dict(pixels=pixels.float() / 255, pose=pose,
-                              projection=matrix.projection[0], inverse=matrix.inverse[0],
-                              prompt=clip["caption"], fps=clip["fps"], scale=scale,
-                              source_view=int(cfg.overfit.views[i]), source_start=0)],
-                   isolated=True, source=str(args.parquet))
-        torch.manual_seed(cfg.seed + i)
-        document = video.prepare(raw, cfg, validation=True)
-        document["views"][0]["text"] = text
-        documents.append(document)
-        torch.save(pixels, args.output / f"pixels_{i}.pt")
-        view = document["views"][0]
-        print(json.dumps(dict(sample=i, fps=view["fps"], source_frames=view["source_frames"],
-                              latent_shape=list(view["latent"].shape),
-                              condition_shape=list(view["condition"]["latent"].shape))), flush=True)
-    torch.save(documents, args.output / "documents.pt")
-    metadata = dict(status="complete", checkpoint=str(Path(cfg.h3.checkpoint).resolve()),
-                    parquet=str(args.parquet), row=int(cfg.overfit.row), views=list(cfg.overfit.views),
-                    frames=int(cfg.overfit.frames), fps=clip["fps"],
-                    height=int(cfg.dataset.height), width=int(cfg.dataset.width),
-                    source_paths=clip["source_paths"], source_indices=clip["sample_indices"],
-                    caption=clip["caption"], text_layer=50, text_shape=list(text.shape),
-                    text_source=str(args.text_from), pose_stable_factor=scale, pose_diameter=diameter,
-                    condition_encode_seed=int(cfg.h3.condition_encode_seed))
-    (args.output / "features.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    OmegaConf.save(cfg, args.output / "resolved.yaml")
+    cfg = load_config(args.config)
+    torch.set_num_threads(1)
+    groups.launch_distributed_job(sp_size_arg=cfg.sp_size, fs_size_arg=cfg.fs_size)
+    device = torch.device("cuda", torch.cuda.current_device())
+    documents = torch.load(args.features / "documents.pt", map_location="cpu", weights_only=True)
+    assert len(documents) == 1 and len(documents[0]["views"]) == 1
+    metadata = json.loads((args.features / "features.json").read_text())
+    assert metadata["cases"][0]["row"] == args.row
+    row = read_rows(str(args.parquet), [args.row]).to_pylist()[0]
+    view = documents[0]["views"][0]
+    assert view["source_frames"] == 4 * row["gen"] - 3
+    scene, motions = str(row["scene"][0] or ""), list(row["chunks"][0] or [])
+    view.update(
+        caption_scene=scene,
+        caption_motions=motions,
+        caption_source_frames=view["source_frames"],
+        prompt=scene,
+    )
+    # Any temporal majority selection is a contiguous subset of source windows.
+    captions = [scene or cfg.negative_prompt]
+    for start in range(len(motions)):
+        for stop in range(start + 1, len(motions) + 1):
+            captions.append(
+                "\n".join(str(x).strip() for x in [scene, *motions[start:stop]] if str(x).strip())
+                or cfg.negative_prompt
+            )
+    captions = list(dict.fromkeys(captions))
+    pixels = torch.load(args.features / "pixels_0.pt", map_location="cpu", weights_only=True)
+    assert pixels.dtype == torch.uint8
+    encoder = TextEncoder(cfg, wrap=partial(wrap_text, cfg=cfg), device=device)
+    bank = encoder.i2v([(caption, [pixels[0]]) for caption in captions])
+    view["caption_feature_bank"] = dict(zip(captions, bank))
+    for name in (
+        "generation_chunks",
+        "clean_prefix_chunks",
+        "texts_by_bd",
+        "texts",
+        "text_tag_specs",
+        "caption_specs",
+    ):
+        view.pop(name, None)
+    view["text"], view["text_tags"] = bank[0]["features"], bank[0]["tags"]
+    if groups.get_rank() == 0:
+        args.output.mkdir(parents=True, exist_ok=True)
+        torch.save(documents, args.output / "documents.pt")
+        shutil.copy2(args.features / "pixels_0.pt", args.output / "pixels_0.pt")
+        metadata.update(
+            caption_policy="bd_overlap",
+            caption_bank=list(captions),
+            feature_parent_sha256=hashlib.sha256((args.features / "documents.pt").read_bytes()).hexdigest(),
+            partition="resampled before each clean-prefix cut; contiguous caption feature bank",
+        )
+        (args.output / "features.json").write_text(json.dumps(metadata, indent=2) + "\n")
+        print(json.dumps(dict(status="complete", captions=len(bank), output=str(args.output))), flush=True)
+    groups.shutdown_distributed()
 
 
 if __name__ == "__main__":

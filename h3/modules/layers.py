@@ -5,6 +5,7 @@ import math
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 
 class SwiGLU(nn.Module):
@@ -21,24 +22,28 @@ class SwiGLU(nn.Module):
 
 class FeedForward(nn.Module):
 
-    def __init__(self,
-                 dim,
-                 dim_out=None,
-                 mult=4,
-                 dropout=0.,
-                 activation_fn="swiglu",
-                 final_dropout=False,
-                 inner_dim=None,
-                 bias=True):
+    def __init__(
+        self,
+        dim,
+        dim_out=None,
+        mult=4,
+        dropout=0.0,
+        activation_fn="swiglu",
+        final_dropout=False,
+        inner_dim=None,
+        bias=True,
+    ):
         super().__init__()
         if activation_fn != "swiglu":
             raise ValueError("H3 uses SwiGLU")
         inner_dim = int(dim * mult) if inner_dim is None else inner_dim
-        self.net = nn.ModuleList([
-            SwiGLU(dim, inner_dim, bias),
-            nn.Dropout(dropout),
-            nn.Linear(inner_dim, dim if dim_out is None else dim_out, bias=bias)
-        ])
+        self.net = nn.ModuleList(
+            [
+                SwiGLU(dim, inner_dim, bias),
+                nn.Dropout(dropout),
+                nn.Linear(inner_dim, dim if dim_out is None else dim_out, bias=bias),
+            ]
+        )
         if final_dropout:
             self.net.append(nn.Dropout(dropout))
 
@@ -80,3 +85,20 @@ class TimestepEmbedding(nn.Module):
 
     def forward(self, x):
         return self.linear_2(self.act(self.linear_1(x)))
+
+
+def get_parameter_dtype(module):
+    # FSDP gathered weights can be Tensor views absent from named_parameters().
+    for child in module.modules():
+        weight = getattr(child, "weight", None)
+        if isinstance(weight, torch.Tensor):
+            return weight.dtype
+    return next(module.parameters()).dtype
+
+
+def set_gradient_checkpointing(module, enabled=True, function=None):
+    function = function or (lambda fn, *args, **kwargs: checkpoint(fn, *args, use_reentrant=False, **kwargs))
+    for child in module.modules():
+        if hasattr(child, "gradient_checkpointing"):
+            child.gradient_checkpointing = enabled
+            child.gradient_checkpointing_func = function

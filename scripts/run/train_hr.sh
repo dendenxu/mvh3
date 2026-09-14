@@ -26,7 +26,7 @@ export PYTHONUNBUFFERED=1 TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
 unset GIT_DIR GIT_WORK_TREE http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 mvh3_run="${MVH3_RUN_DIR:-local/production64_${ARNOLD_MONITOR_TRIAL_ID}}"
 mvh3_config="${MVH3_TRAIN_CONFIG:-configs/diffusion_forcing.yaml}"
-"$mvh3_python" scripts/verify_runtime_environment.py \
+"$mvh3_python" scripts/runtime_env.py \
   --reference "${MVH3_FA4_REFERENCE:-local/attention_native_reference_v2/fa4_source_receipt.json}" \
   --output "$mvh3_run/runtime_node${ARNOLD_ID}.json"
 

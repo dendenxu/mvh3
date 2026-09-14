@@ -7,10 +7,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 : "${MVH3_DATA_ROOT:?Set the WorldViews source root}"
 : "${MVH3_DATA_ROOT3:?Set the second WorldViews source root}"
 
-overfit_output="${1:-local/overfit_i2v}"
-overfit_features="${2:-local/overfit_i2v/features}"
+overfit_output="${1:-local/overfit_diffusion_forcing}"
+overfit_features="${2:-local/overfit_diffusion_forcing/features}"
 overfit_python="${MVH3_PYTHON:-python}"
-overfit_config="${3:-configs/overfit_i2v.yaml}"
+overfit_config="${3:-configs/overfit_diffusion_forcing.yaml}"
 mkdir -p "$overfit_output"
 exec 9>"$overfit_output/runner.lock"
 if ! flock -n 9; then

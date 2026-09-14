@@ -33,8 +33,7 @@ train = [
     "accelerate>=1.2.1",
     "numpy>=1.26", "scipy>=1.10", "pyarrow>=17",
     "opencv-python-headless>=4.10", "pillow", "av", "torchcodec",
-    "imageio", "imageio-ffmpeg", "pycolmap",
-    "h5py", "rich", "ujson", "ruamel.yaml", "tqdm", "wandb",
+    "matplotlib", "rich", "tqdm", "byted-wandb",
     "ninja", "pybind11",
     "flash-attn-4==4.0.0b18", "nvidia-cutlass-dsl==4.5.2",
 ]
@@ -51,4 +50,12 @@ include = ["h3*", "model*", "trainer*", "pipeline*", "dataset*", "utils*", "conf
 testpaths = ["tests"]
 
 [tool.ruff]
-line-length = 119
+line-length = 110
+
+[tool.isort]
+profile = "black"
+line_length = 110
+known_first_party = ["configs", "dataset", "h3", "model", "pipeline", "trainer", "utils"]
+
+[tool.black]
+line-length = 110

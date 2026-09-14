@@ -4,9 +4,6 @@ import torch
 
 from h3.data import temporal_layout
 from h3.modules.masking import TokenLayout
-from h3.utils.optim import MasterAdamW
-from h3.packing import teacher_forcing_batch
-from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
 
 
 def test_arbitrary_temporal_lengths_keep_real_tail():
@@ -23,64 +20,45 @@ def test_arbitrary_temporal_lengths_keep_real_tail():
     assert int(short.camera_frames[short.valid][-1]) == 76
 
 
-def test_fp32_master_accumulates_sub_bf16_updates_and_resumes():
-    parameter = torch.nn.Parameter(torch.ones(4, dtype=torch.bfloat16))
-    optimizer = MasterAdamW([("weight", parameter)], lr=1e-6, weight_decay=0)
-    for _ in range(8):
-        parameter.grad = torch.ones_like(parameter)
-        optimizer.step()
-    assert torch.equal(parameter, torch.ones_like(parameter))
-    assert (optimizer.masters[0] < 1).all()
+def test_trainable_attention_preserves_sub_bf16_updates_and_resumes():
+    from fixtures_h3 import tiny_model
+    from test_worldviews import recipe
+
+    model = tiny_model().bfloat16()
+    model.configure_attention(recipe())
+    parameter = model.transformer_blocks[0].attn.to_q.weight
+    assert parameter.requires_grad and parameter.dtype == torch.float32
+    with torch.no_grad():
+        parameter.fill_(1)
+    optimizer = torch.optim.AdamW([parameter], lr=1e-6, weight_decay=0)
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    # The update is smaller than a BF16 unit but survives in the actual weight
+    # storage used by FSDP; forward casts do not replace that FP32 storage.
+    assert (parameter < 1).all()
+    assert torch.equal(parameter.bfloat16(), torch.ones_like(parameter, dtype=torch.bfloat16))
     buffer = io.BytesIO()
-    torch.save(optimizer.state_dict(), buffer)
+    torch.save(dict(weight=parameter.detach(), optimizer=optimizer.state_dict()), buffer)
     buffer.seek(0)
-    resumed_parameter = torch.nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))
-    resumed = MasterAdamW([("weight", resumed_parameter)], lr=1e-6, weight_decay=0)
-    resumed.load_state_dict(torch.load(buffer, weights_only=True))
+    saved = torch.load(buffer, weights_only=True)
+    resumed_parameter = torch.nn.Parameter(saved["weight"].clone())
+    resumed = torch.optim.AdamW([resumed_parameter], lr=1e-6, weight_decay=0)
+    resumed.load_state_dict(saved["optimizer"])
     parameter.grad = torch.ones_like(parameter)
     resumed_parameter.grad = torch.ones_like(parameter)
     optimizer.step()
     resumed.step()
-    assert torch.equal(optimizer.masters[0], resumed.masters[0])
     assert torch.equal(parameter, resumed_parameter)
 
 
 def test_padding_cannot_relay_into_valid_tokens():
-    layout = TokenLayout(torch.tensor([0, 1, 2, 2]), torch.tensor([-1, 0, 1, 1]), torch.tensor([-1, 0, 0, 0]), True,
-                         torch.tensor([True, True, True, False]))
+    layout = TokenLayout(
+        torch.tensor([0, 1, 2, 2]),
+        torch.tensor([-1, 0, 1, 1]),
+        torch.tensor([-1, 0, 0, 0]),
+        True,
+        torch.tensor([True, True, True, False]),
+    )
     mask = layout.dense()
     assert not mask[:3, 3].any()
     assert mask[3].sum() == 1 and mask[3, 3]
-
-
-def test_context_mixing_timestep_and_geometry_match_packed_rows():
-    temporal = temporal_layout(77)
-    camera = torch.zeros(2, 27, 10)
-    camera[..., :2] = 1
-    camera[1, :, 7] = 1
-    features = dict(latents=torch.ones(2, 24, 27, 2, 2),
-                    camera_pose=camera,
-                    rotary_frames=temporal.rotary_frames,
-                    valid_frames=temporal.valid,
-                    fps=16,
-                    prompt_embeds=torch.ones(1, 3, 5120))
-    inputs, target, mask = teacher_forcing_batch(features, "cpu", sigma=0.3, context_noise_std=0)
-    times = inputs["timestep"][inputs["timestep_indices"]]
-    assert torch.all(times[:3] == 0.7)
-    assert times[3] == 1
-    assert torch.all(times[4:3 + 54] == 0.8)
-    assert torch.all(times[3 + 54:] == 0.7)
-    assert inputs["camera_indices"][3:7].tolist() == [0, 1, 2, 3]
-    assert inputs["camera_pose"][0, 1, 7] == 1
-    assert int(mask.sum()) == 2 * 27 - 1
-    assert inputs["position_ids"][5, 0] == 3 + 40 / 16
-    assert target.shape == inputs["hidden_states"].shape
-    clean = torch.ones_like(target[:, 54:])
-    velocity = target[:, 54:]
-    noise = clean - velocity
-    noisy = inputs["hidden_states"][:, 54:]
-    scheduler = MiniMaxH3Scheduler()
-    expected = scheduler.scale_noise(clean, inputs["timestep"][1], noise)
-    torch.testing.assert_close(noisy, expected)
-    # Native denoising is x0 = x_t + sigma*v. This catches a reversed target sign.
-    torch.testing.assert_close(noisy + 0.3 * velocity, clean)

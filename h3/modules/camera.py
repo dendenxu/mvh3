@@ -5,9 +5,9 @@ WorldGen's pure-temporal encoding. H3 uses split-half RoPE, so its H/W pairs
 must be gathered and interleaved before applying that allocation.
 """
 
-from dataclasses import dataclass, fields
 import json
 import math
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 import torch
@@ -18,7 +18,7 @@ FROZEN_BASES = {
 }
 # Five log-spaced frequencies retain the historical 12-frequency range in
 # the existing 30 translation channels, without touching native T or the tail.
-TRANSLATION_FREQUENCIES = tuple(0.01 * 3200.0**(index / 4) for index in range(5))
+TRANSLATION_FREQUENCIES = tuple(0.01 * 3200.0 ** (index / 4) for index in range(5))
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,9 @@ class CameraEncoding:
     w_sin: torch.Tensor
 
     def to(self, device, non_blocking=False):
-        return type(self)(*(getattr(self, field.name).to(device, non_blocking=non_blocking) for field in fields(self)))
+        return type(self)(
+            *(getattr(self, field.name).to(device, non_blocking=non_blocking) for field in fields(self))
+        )
 
 
 @dataclass(frozen=True)
@@ -41,8 +43,10 @@ class MatrixCameraEncoding:
     inverse: torch.Tensor
 
     def to(self, device, non_blocking=False):
-        return type(self)(self.projection.to(device, non_blocking=non_blocking),
-                          self.inverse.to(device, non_blocking=non_blocking))
+        return type(self)(
+            self.projection.to(device, non_blocking=non_blocking),
+            self.inverse.to(device, non_blocking=non_blocking),
+        )
 
 
 @dataclass(frozen=True)
@@ -52,7 +56,9 @@ class CameraBundle:
     wrapped: bool = False
 
     def to(self, device, non_blocking=False):
-        return type(self)(self.decomposed.to(device, non_blocking), self.matrix.to(device, non_blocking), self.wrapped)
+        return type(self)(
+            self.decomposed.to(device, non_blocking), self.matrix.to(device, non_blocking), self.wrapped
+        )
 
 
 def camera_projection(pose):
@@ -73,7 +79,7 @@ def matrix_rotary(rotary, indices):
     cos, sin = rotary
     keep = torch.ones(cos.shape[-1], device=cos.device, dtype=torch.bool)
     for start in (22, 38, 70, 86):
-        keep[start:start + 10] = False
+        keep[start : start + 10] = False
     keep = keep[None] | (indices < 0)[:, None]
     return torch.where(keep, cos, 1.0), torch.where(keep, sin, 0.0)
 
@@ -88,14 +94,16 @@ def apply_matrix(features, matrices, indices, head_offset=0, total_heads=None, c
     if per_head:
         heads = features.shape[2]
         subframes = matrix.shape[2]
-        assigned = (torch.arange(heads, device=features.device) + head_offset) * subframes // (total_heads or heads)
+        assigned = (
+            (torch.arange(heads, device=features.device) + head_offset) * subframes // (total_heads or heads)
+        )
         matrix = matrix.index_select(2, assigned)
 
     def project(x):
-        points = x[..., channel_start:channel_start + 20].unflatten(-1, (5, 4))
+        points = x[..., channel_start : channel_start + 20].unflatten(-1, (5, 4))
         equation = "bshij,bshpj->bshpi" if per_head else "bsij,bshpj->bshpi"
         projected = torch.einsum(equation, matrix, points).flatten(-2)
-        return torch.cat((x[..., :channel_start], projected, x[..., channel_start + 20:]), -1)
+        return torch.cat((x[..., :channel_start], projected, x[..., channel_start + 20 :]), -1)
 
     paired = torch.stack((t, project(h), project(w)), -2).unflatten(-1, (16, 2)).flatten(-3, -2)
     result = torch.cat((paired[..., 0], paired[..., 1], features[..., 96:].float()), -1).to(features.dtype)
@@ -110,7 +118,11 @@ def rotvec_to_matrix(rotvec: torch.Tensor) -> torch.Tensor:
     skew = skew.reshape(*rotvec.shape[:-1], 3, 3)
     theta = torch.linalg.vector_norm(rotvec, dim=-1)[..., None, None]
     eye = torch.eye(3, device=rotvec.device, dtype=rotvec.dtype)
-    return eye + torch.sinc(theta / math.pi) * skew + 0.5 * torch.sinc(theta / (2 * math.pi)).square() * (skew @ skew)
+    return (
+        eye
+        + torch.sinc(theta / math.pi) * skew
+        + 0.5 * torch.sinc(theta / (2 * math.pi)).square() * (skew @ skew)
+    )
 
 
 def wigner_rotation(rotation: torch.Tensor, order: int) -> torch.Tensor:
@@ -149,14 +161,20 @@ def precompute_camera(pose_10d: torch.Tensor, reference=None) -> CameraEncoding:
             pose = pose.clone()
             pose[..., :2] = pose[..., :2] / reference[..., :2]
             pose[..., 2:4] -= reference[..., 2:4]
-            pose[..., 7:10] = (ref_rotation.mT @ (pose[..., 7:10] - reference[..., 7:10])[..., None]).squeeze(-1)
+            pose[..., 7:10] = (ref_rotation.mT @ (pose[..., 7:10] - reference[..., 7:10])[..., None]).squeeze(
+                -1
+            )
         frequencies = pose.new_tensor(TRANSLATION_FREQUENCIES)
         translation = pose[..., 7:10, None] * frequencies
         intrinsics = torch.cat((pose[..., :2].log(), pose[..., 2:4]), dim=-1) * 4.0
         # H: D1(3) + D2(5) + tx(10) + tz frequency indices {0,2,4}(6) + fx,cx(4).
         # W: D1(3) + D3(7) + ty(10) + tz frequency indices {1,3}(4) + fy,cy(4).
-        h_angles = torch.cat((translation[..., 0, :], translation[..., 2, (0, 2, 4)], intrinsics[..., (0, 2)]), dim=-1)
-        w_angles = torch.cat((translation[..., 1, :], translation[..., 2, (1, 3)], intrinsics[..., (1, 3)]), dim=-1)
+        h_angles = torch.cat(
+            (translation[..., 0, :], translation[..., 2, (0, 2, 4)], intrinsics[..., (0, 2)]), dim=-1
+        )
+        w_angles = torch.cat(
+            (translation[..., 1, :], translation[..., 2, (1, 3)], intrinsics[..., (1, 3)]), dim=-1
+        )
         rotation2, rotation3 = wigner_rotation(rotation, 2), wigner_rotation(rotation, 3)
         if reference is not None:
             rotation2 = torch.where(neutral[..., None, None], torch.eye(5, device=pose.device), rotation2)
@@ -178,11 +196,15 @@ def relative_projection(projection, inverse, reference, reference_inverse):
     relative_inverse = reference @ inverse
     neutral = (projection == reference).all(dim=(-1, -2))
     identity = torch.eye(4, device=projection.device, dtype=projection.dtype)
-    return MatrixCameraEncoding(torch.where(neutral[..., None, None], identity, relative),
-                                torch.where(neutral[..., None, None], identity, relative_inverse))
+    return MatrixCameraEncoding(
+        torch.where(neutral[..., None, None], identity, relative),
+        torch.where(neutral[..., None, None], identity, relative_inverse),
+    )
 
 
-def apply_camera(features: torch.Tensor, camera: CameraEncoding, camera_indices: torch.Tensor) -> torch.Tensor:
+def apply_camera(
+    features: torch.Tensor, camera: CameraEncoding, camera_indices: torch.Tensor
+) -> torch.Tensor:
     """Overlay camera encoding after native RoPE on [B, S, heads, 128] Q or K.
 
     camera_indices is [S], indexing the pose table; -1 leaves a token exact.
@@ -191,7 +213,7 @@ def apply_camera(features: torch.Tensor, camera: CameraEncoding, camera_indices:
     """
     if features.shape[-1] != 128:
         raise ValueError("The camera allocation requires H3's 128-channel attention heads")
-    if camera_indices.shape != (features.shape[1], ):
+    if camera_indices.shape != (features.shape[1],):
         raise ValueError("camera_indices must match the local packed sequence length")
     ids = camera_indices.clamp_min(0)
 
@@ -208,20 +230,24 @@ def apply_camera(features: torch.Tensor, camera: CameraEncoding, camera_indices:
         first, second = features[..., :48].float(), features[..., 48:96].float()
         paired = torch.stack((first, second), dim=-1).unflatten(-2, (3, 16))
         t, h, w = paired.flatten(-2).unbind(-2)
-        h = torch.cat((
-            project(h[..., :3], camera.rotation),
-            project(h[..., 3:8], camera.rotation2),
-            rotate_pairs(h[..., 8:28], camera.h_cos, camera.h_sin),
-            h[..., 28:],
-        ),
-                      dim=-1)
-        w = torch.cat((
-            project(w[..., :3], camera.rotation),
-            project(w[..., 3:10], camera.rotation3),
-            rotate_pairs(w[..., 10:28], camera.w_cos, camera.w_sin),
-            w[..., 28:],
-        ),
-                      dim=-1)
+        h = torch.cat(
+            (
+                project(h[..., :3], camera.rotation),
+                project(h[..., 3:8], camera.rotation2),
+                rotate_pairs(h[..., 8:28], camera.h_cos, camera.h_sin),
+                h[..., 28:],
+            ),
+            dim=-1,
+        )
+        w = torch.cat(
+            (
+                project(w[..., :3], camera.rotation),
+                project(w[..., 3:10], camera.rotation3),
+                rotate_pairs(w[..., 10:28], camera.w_cos, camera.w_sin),
+                w[..., 28:],
+            ),
+            dim=-1,
+        )
         paired = torch.stack((t, h, w), dim=-2).unflatten(-1, (16, 2)).flatten(-3, -2)
         rotated = torch.cat((paired[..., 0], paired[..., 1]), dim=-1).to(features.dtype)
         result = torch.cat((rotated, features[..., 96:]), dim=-1)

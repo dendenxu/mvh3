@@ -2,8 +2,8 @@ from pathlib import Path
 
 import torch
 
+from dataset.loader import source_documents
 from h3.modules.masking import CLEAN, CONDITION, NOISY, TokenLayout
-from utils.h3_wrapper import source_documents
 
 
 def test_all_views_and_tails_retained(monkeypatch):
@@ -12,7 +12,7 @@ def test_all_views_and_tails_retained(monkeypatch):
     for index, count in enumerate(counts):
         frames = torch.arange(count)
         views.append(dict(source_view=index, pixels=frames, pose=frames, projection=frames, inverse=frames))
-    monkeypatch.setattr("utils.h3_wrapper.extract_views", lambda sample: views)
+    monkeypatch.setattr("dataset.loader.extract_views", lambda sample: views)
     documents = source_documents({"cpu": {"parquet": "source.parquet"}}, stage=1, short_frames=77)
     assert [[v["source_view"] for v in doc["views"]] for doc in documents] == [[0, 1, 2, 3], [0, 3], [0], [0]]
     assert all(doc["isolated"] and doc["source"] == "source.parquet" for doc in documents)
@@ -33,9 +33,11 @@ def test_all_views_and_tails_retained(monkeypatch):
 def test_both_stages_use_the_same_full_sources():
     configs = Path(__file__).resolve().parents[1] / "configs"
     from omegaconf import OmegaConf
+
     from utils.config import load_config
-    short = load_config(configs / "stage1_short_mono.yaml")
-    full = load_config(configs / "stage2_long_multiview.yaml")
+
+    short = load_config(configs / "worldviews.yaml")
+    full = load_config(configs / "worldviews.yaml", ["h3.stage=2"])
     assert OmegaConf.to_container(short.dataset) == OmegaConf.to_container(full.dataset)
     assert len(short.dataset.datasets) == 19
     assert short.h3.stage == 1 and full.h3.stage == 2
@@ -67,27 +69,44 @@ def test_split_block_mask_matches_reference_with_padding_and_subsets():
     scope = (ids // 97) % 2
     scope[(kind == CONDITION) & (ids < 31)] = -1
     dropout = torch.eye(4, dtype=torch.bool).roll(-1, dims=0)
-    for joint, cross_view, history in ((False, False, True), (False, True, True),
-                                       (False, False, False), (True, True, True), (True, False, True)):
+    for joint, cross_view, history in (
+        (False, False, True),
+        (False, True, True),
+        (False, False, False),
+        (True, True, True),
+        (True, False, True),
+    ):
         for active in (None, ids % 31 != 0):
             layout = TokenLayout(kind, chunk, scope, cross_view, active, dropout, history, joint)
             for indices in (None, ids[::2].flip(0)):
                 for block_size in (128, (640, 128)):
                     actual = layout.block_mask(indices, block_size=block_size)
                     size = len(ids) if indices is None else len(indices)
-                    expected = create_block_mask(actual.mask_mod, None, None, size, size,
-                                                 device="cpu", BLOCK_SIZE=block_size, _compile=False)
+                    expected = create_block_mask(
+                        actual.mask_mod,
+                        None,
+                        None,
+                        size,
+                        size,
+                        device="cpu",
+                        BLOCK_SIZE=block_size,
+                        _compile=False,
+                    )
                     for prefix in ("kv", "q", "full_kv", "full_q"):
                         for suffix in ("num_blocks", "indices"):
                             field = f"{prefix}_{suffix}"
-                            torch.testing.assert_close(getattr(actual, field), getattr(expected, field), rtol=0, atol=0)
-                    torch.testing.assert_close(layout.dense(indices),
-                                               actual.mask_mod(0, 0, torch.arange(size)[:, None],
-                                                               torch.arange(size)[None, :]))
+                            torch.testing.assert_close(
+                                getattr(actual, field), getattr(expected, field), rtol=0, atol=0
+                            )
+                    torch.testing.assert_close(
+                        layout.dense(indices),
+                        actual.mask_mod(0, 0, torch.arange(size)[:, None], torch.arange(size)[None, :]),
+                    )
 
 
 def test_rectangular_cache_mask_matches_native_metadata_and_padding():
     from torch.nn.attention.flex_attention import create_block_mask
+
     from h3.modules.masking import build_block_mask
 
     for query_length, key_length in ((37, 533), (257, 1207), (389, 389)):
@@ -95,15 +114,31 @@ def test_rectangular_cache_mask_matches_native_metadata_and_padding():
         old_count = key_length - query_length
         kind = torch.where(ids < old_count, CLEAN, NOISY)
         chunk, scope = ids // 73, (ids // 137) % 2
-        for single, joint, cross_view in ((False, False, True), (True, False, True),
-                                          (True, False, False), (False, True, False)):
-            layout = TokenLayout(kind, chunk, scope, cross_view, ids % 31 != 0,
-                                 torch.eye(17, dtype=torch.bool), joint=joint, single_sequence=single)
+        for single, joint, cross_view in (
+            (False, False, True),
+            (True, False, True),
+            (True, False, False),
+            (False, True, False),
+        ):
+            layout = TokenLayout(
+                kind,
+                chunk,
+                scope,
+                cross_view,
+                ids % 31 != 0,
+                torch.eye(17, dtype=torch.bool),
+                joint=joint,
+                single_sequence=single,
+            )
 
             def mask_mod(b, h, q, k):
-                return ((q < query_length) & (k < key_length)
-                        & layout.mask_mod(b, h, (q + old_count).clamp_max(key_length - 1),
-                                           k.clamp_max(key_length - 1)))
+                return (
+                    (q < query_length)
+                    & (k < key_length)
+                    & layout.mask_mod(
+                        b, h, (q + old_count).clamp_max(key_length - 1), k.clamp_max(key_length - 1)
+                    )
+                )
 
             actual = build_block_mask(mask_mod, query_length, key_length, "cpu")
             expected = create_block_mask(mask_mod, None, None, query_length, key_length, device="cpu")
@@ -111,7 +146,9 @@ def test_rectangular_cache_mask_matches_native_metadata_and_padding():
             for prefix in ("kv", "q", "full_kv", "full_q"):
                 for suffix in ("num_blocks", "indices"):
                     field = f"{prefix}_{suffix}"
-                    torch.testing.assert_close(getattr(actual, field), getattr(expected, field), rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        getattr(actual, field), getattr(expected, field), rtol=0, atol=0
+                    )
             q, k = torch.arange(query_length + 17)[:, None], torch.arange(key_length + 17)[None, :]
             visible = actual.mask_mod(0, 0, q, k)
             torch.testing.assert_close(visible, expected.mask_mod(0, 0, q, k), rtol=0, atol=0)
@@ -125,8 +162,7 @@ def test_nested_compile_keeps_mask_reduction_separate_from_grid_sort():
     graphs = []
 
     def predicate(b, h, q, k):
-        return ((q < 37) & (k < 533)
-                & (labels[k.clamp_max(532)] <= labels[(q + 496).clamp_max(532)]))
+        return (q < 37) & (k < 533) & (labels[k.clamp_max(532)] <= labels[(q + 496).clamp_max(532)])
 
     def outer():
         mask = build_block_mask(predicate, 37, 533, "cpu")
@@ -143,4 +179,6 @@ def test_nested_compile_keeps_mask_reduction_separate_from_grid_sort():
         nodes = list(graph.graph.nodes)
         has_reduction = any(node.target == "sum" and node.kwargs.get("dim") == (3, 5) for node in nodes)
         has_sort = any("argsort" in str(node.target) for node in nodes)
-        assert not (has_reduction and has_sort), "Outer compilation fused the quadratic reduction with grid sorting"
+        assert not (
+            has_reduction and has_sort
+        ), "Outer compilation fused the quadratic reduction with grid sorting"

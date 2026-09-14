@@ -2,13 +2,13 @@ from copy import deepcopy
 
 import pytest
 import torch
-
 from fixtures_h3 import feature_document, tiny_model
-from test_worldviews import recipe, dense_inputs
+from test_worldviews import dense_inputs, recipe
+
 from h3.modules.kv_cache import HistoryCache
 from h3.modules.masking import CLEAN, NOISY, TokenLayout
-from model.chunks import source_chunk_ids, prepare_chunk_plan, caption_chunk, chunk_intervals, view_chunk_ids
-from model.diffusion import WorldViewsObjective
+from model.chunks import caption_chunk, chunk_intervals, prepare_chunk_plan, source_chunk_ids, view_chunk_ids
+from model.diffusion import DiffusionObjective
 from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.config import validate_config
 
@@ -44,11 +44,11 @@ def test_grouping_keeps_whole_source_chunks_and_all_decoder_support(frames):
 def test_one_chunk_groups_exactly_reproduce_fixed_objective_without_rng_drift():
     cfg, doc = recipe(), feature_document(frames=77)
     torch.manual_seed(52)
-    fixed, target, weights, _, _ = WorldViewsObjective(cfg).pack(doc, "cpu")
+    fixed, target, weights, _, _ = DiffusionObjective(cfg).pack(doc, "cpu")
     state = torch.get_rng_state()
     cfg.h3.chunk_group_range = [1, 1]
     torch.manual_seed(52)
-    grouped, new_target, new_weights, _, _ = WorldViewsObjective(cfg).pack(doc, "cpu")
+    grouped, new_target, new_weights, _, _ = DiffusionObjective(cfg).pack(doc, "cpu")
     assert torch.equal(state, torch.get_rng_state())
     torch.testing.assert_close(dense_inputs(fixed), dense_inputs(grouped), rtol=0, atol=0)
     torch.testing.assert_close((target, weights), (new_target, new_weights), rtol=0, atol=0)
@@ -84,7 +84,7 @@ def test_source_captions_keep_distinct_features_tags_and_time_origins():
     view["texts"] = [(i, torch.full((1, i + 2, 32), float(i))) for i in range(4)]
     view["text_tag_specs"] = {i: torch.ones(i + 2, dtype=torch.long) for i in range(4)}
     assert [caption_chunk(view, i, cfg.chunk_size) for i in range(4)] == [0, 1, 1, 1]
-    inputs, *_ = WorldViewsObjective(cfg).pack(doc, "cpu", evaluation_sigma=.5)
+    inputs, *_ = DiffusionObjective(cfg).pack(doc, "cpu", evaluation_sigma=0.5)
     n = sum(i + 2 for i in range(4))
     assert torch.equal(inputs["encoder_hidden_states"], torch.cat([x for _, x in view["texts"]], 1))
     assert inputs["attention_mask"].chunk[:n].tolist() == [0, 0] + [1] * (n - 2)
@@ -97,7 +97,7 @@ def test_merged_block_is_bidirectional_but_cannot_read_the_next_block():
     view = doc["views"][0]
     source = source_chunk_ids(view, cfg.chunk_size)
     view["generation_chunks"] = torch.tensor([0, 0, 1, 1])[source]
-    inputs, *_ = WorldViewsObjective(cfg).pack(doc, "cpu", evaluation_sigma=.5)
+    inputs, *_ = DiffusionObjective(cfg).pack(doc, "cpu", evaluation_sigma=0.5)
     layout = inputs["attention_mask"]
     noisy = torch.nonzero(layout.kind == NOISY).flatten()
     mask = layout.dense()[noisy[:, None], noisy]
@@ -119,7 +119,7 @@ def test_future_caption_changes_do_not_change_earlier_random_chunks():
     results, positions = [], []
     for sample in (doc, changed):
         torch.manual_seed(65)
-        inputs, *_ = WorldViewsObjective(cfg).pack(sample, "cpu", evaluation_sigma=.5)
+        inputs, *_ = DiffusionObjective(cfg).pack(sample, "cpu", evaluation_sigma=0.5)
         layout = inputs["attention_mask"]
         selected = (layout.kind == NOISY) & (layout.chunk == 0)
         positions.append(inputs["position_ids"][selected])
@@ -135,8 +135,9 @@ def test_pending_rf_partition_is_retained_after_checkpoint_restore(tmp_path):
     planned = prepare_chunk_plan(doc, cfg, "cpu")
     model = torch.nn.Linear(3, 2)
     optimizer = torch.optim.AdamW(model.parameters())
-    checkpoint = save_checkpoint(model, optimizer, cfg, 1, 1,
-                                 {"pending_rf": (planned, [planned["views"][0]["latent"]])}, tmp_path)
+    checkpoint = save_checkpoint(
+        model, optimizer, cfg, 1, 1, {"pending_rf": (planned, [planned["views"][0]["latent"]])}, tmp_path
+    )
     restored = load_checkpoint(model, optimizer, cfg, checkpoint)
     pending = restored["runtime"]["pending_rf"][0]
     state = torch.get_rng_state()
@@ -151,11 +152,16 @@ def test_variable_chunk_cache_window_uses_source_time_instead_of_chunk_count():
     intervals = chunk_intervals(view, 5)
     assert intervals.tolist() == [[0, 37], [37, 57], [57, 77]]
     cache = HistoryCache(intervals=[intervals], sink_frames=1, window_frames=20)
-    layout = TokenLayout(torch.full((3,), CLEAN), torch.arange(3), torch.zeros(3, dtype=torch.long),
-                         True, torch.ones(3, dtype=torch.bool))
+    layout = TokenLayout(
+        torch.full((3,), CLEAN),
+        torch.arange(3),
+        torch.zeros(3, dtype=torch.long),
+        True,
+        torch.ones(3, dtype=torch.bool),
+    )
     key = torch.arange(3).reshape(1, 3, 1, 1).float()
     cache.segments = [(key, key.clone(), layout)]
-    cache._trim(2)
+    cache.trim_history(2)
     expected = (intervals[:, 0] < 1) | (intervals[:, 1] > 77 - 20)
     assert torch.equal(cache.segments[0][2].chunk, torch.arange(3)[expected])
 
@@ -185,7 +191,7 @@ def test_saved_plan_cannot_merge_more_than_the_configured_chunk_count():
         prepare_chunk_plan(doc, cfg, "cpu")
 
 
-@pytest.mark.parametrize("bounds", [[0, 20], [20, 3], [3], [3., 20], True])
+@pytest.mark.parametrize("bounds", [[0, 20], [20, 3], [3], [3.0, 20], True])
 def test_invalid_chunk_ranges_fail_closed(bounds):
     cfg = recipe()
     cfg.h3.chunk_group_range = bounds

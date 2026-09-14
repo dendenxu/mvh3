@@ -9,11 +9,16 @@ from utils.distributed import get_rank
 
 
 class Requests:
+
     def __init__(self):
         self.directory = None
         trial = os.environ.get("ARNOLD_MONITOR_TRIAL_ID", "")
         if trial and trial != "unknown":
-            root = os.environ.get("HR_STATE_ROOT") or os.environ.get("HR_ROOT") or str(Path(os.environ.get("BN", "/mnt/bn/foundation-ads3/zhenxu.zx")) / "hotreload")
+            root = (
+                os.environ.get("HR_STATE_ROOT")
+                or os.environ.get("HR_ROOT")
+                or str(Path(os.environ.get("BN", "/mnt/bn/foundation-ads3/zhenxu.zx")) / "hotreload")
+            )
             self.directory = Path(root) / trial
             group = os.environ.get("HR_CONTROL_GROUP", "").strip()
             if group:
