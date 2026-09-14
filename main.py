@@ -32,10 +32,9 @@ def main():
     # are configured separately; mixing the two breaks checkpoint compile guards.
     torch.set_num_threads(int(os.environ.get("WORLDGEN_TORCH_NUM_THREADS", "1")))
     if cfg.task == "inference" and cfg.get("inference_request"):
-        sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
-        from scripts.infer import run
-        run(cfg, cfg.inference_request, cfg.h3.logdir, cfg.resume_ckpt,
-            cfg.get("inference_protocol", "auto"), cfg.seed)
+        from pipeline.inference import run
+        run(cfg, request_path=cfg.inference_request, output=cfg.h3.logdir, checkpoint=cfg.resume_ckpt,
+            protocol=cfg.get("inference_protocol", "auto"), seed=cfg.seed)
         return
     from trainer.diffusion import Trainer
     if cfg.task == "inference":

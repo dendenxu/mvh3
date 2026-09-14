@@ -12,27 +12,38 @@ optional reference/conversion checks, not by the training or inference runtime.
 ## Structure
 
 ```text
-main.py                         # same config entry pattern as WorldViews
-configs/worldviews.yaml         # complete reference recipe + explicit H3 overlay
-configs/diffusion_forcing.yaml  # single sequence, random BD blocks, clean-prefix cut
-configs/worldviews_stage2.yaml  # continuation on full-duration/multiview samples
-trainer/diffusion.py            # data loop, optimizer, RF, validation, resume
-model/diffusion.py              # single-sequence DF and historical TF compatibility
-pipeline/ar_inference.py        # chunk rollout, CFG, UniPC, KV history
-h3/modules/model.py             # native packed video/text/audio transformer
-h3/modules/attention.py         # SDPA and compiled flex kernels
-h3/modules/camera.py            # matrix and decomposed PRoPE
-h3/modules/vae.py               # CNN encoder, ViT decoder, tiling and stitching
-h3/distributed/fsdp.py          # FSDP, Ulysses, checkpointing, compilation
-h3/utils/                      # native scheduler and WorldViews UniPC/DPM
-h3/checkpoint.py                # strict original-weight streaming conversion
-utils/h3_wrapper.py             # pixels/cameras -> H3 latents and Qwen features
-utils/checkpoint.py             # atomic sharded AdamW/weight/runtime checkpoints
-dataset/                       # all WorldViews source-family samplers
-utils/                         # original data/distributed/compile optimizations
-scripts/                       # bounded verification and feature preparation
-tests/                         # numerical and behavioral regression tests
+main.py                                 # same config entry pattern as WorldViews
+configs/worldviews.yaml                 # complete reference recipe + explicit H3 overlay
+configs/diffusion_forcing.yaml          # single sequence, random BD blocks, clean-prefix cut
+configs/stage1_compile_buckets.yaml     # full-data Stage 1, context noise and bounded shapes
+trainer/diffusion.py                    # training loop, optimizer/EMA updates, validation, resume
+dataset/stream.py                       # source loading, encoding and the SP sample queue
+model/diffusion.py                      # noise policy, clean prefix, flow loss and RF
+model/chunks.py                         # latent block partition and caption timeline
+model/packing.py                        # text/video tokens, masks and camera/time tables
+pipeline/inference.py                   # image/camera requests -> raw/EMA sampling -> saved videos
+pipeline/ar_inference.py                # chunk rollout, Euler/UniPC, CFG and KV history
+pipeline/joint_inference.py             # native full-sequence sampler and initialization control
+h3/modules/model.py                     # native packed video/text/audio transformer
+h3/modules/attention.py                 # SDPA and compiled flex kernels
+h3/modules/camera.py                    # matrix and decomposed PRoPE
+h3/modules/vae.py                       # CNN encoder, ViT decoder, tiling and stitching
+h3/distributed/fsdp.py                  # FSDP, Ulysses, checkpointing, compilation
+h3/utils/                               # native scheduler and WorldViews UniPC/DPM
+h3/checkpoint.py                        # strict original-weight streaming conversion
+utils/h3_wrapper.py                     # pixels/cameras -> H3 latents and Qwen features
+utils/checkpoint.py                     # atomic sharded AdamW/weight/runtime checkpoints
+dataset/                                # all WorldViews source-family samplers
+utils/                                  # original data/distributed/compile optimizations
+scripts/                                # command-line entry points, experiments and verification
+tests/                                  # numerical and behavioral regression tests
 ```
+
+Read `main.py` -> `Trainer.train_loop` -> `SourceStream.next` ->
+`WorldViewsObjective` for the training path. `SequencePacker` handles tensor
+layout separately from the noise/loss policy. Both inference entry points call
+`pipeline.inference.run`. The [code guide](docs/MVH3.md) explains the interfaces
+and config chain; [experiment history](docs/EXPERIMENTS.md) keeps dated results.
 
 ## Recipe
 
@@ -99,8 +110,8 @@ No model weights or dataset files are stored in this Git repository.
 Stage 2 runs automatically at `h3.stage1_steps`, or explicitly:
 
 ```bash
-torchrun --nproc_per_node=8 main.py -c configs/worldviews_stage2.yaml \
-  resume_ckpt=/path/to/ckpt/latest.json
+torchrun --nproc_per_node=8 main.py -c local/experiment/resolved.yaml \
+  h3.stage=2 resume_ckpt=/path/to/ckpt/latest.json
 ```
 
 Resume requires the same FSDP/SP topology. It restores trainable shards, AdamW,

@@ -5,6 +5,18 @@ import torch
 from utils.distributed import broadcast_scoped
 
 
+def chunk_ids(frames, chunk_size):
+    # The first Wan chunk has 4*k-3 source frames; later chunks have 4*k.
+    return ((frames + 3) / (4 * chunk_size)).floor().long()
+
+
+def view_chunk_ids(view, chunk_size, device=None):
+    """Keep decoder-support latents in the view's final requested chunk."""
+    chunks = (view["generation_chunks"].to(device) if "generation_chunks" in view
+              else chunk_ids(view["frames"].to(device), chunk_size))
+    return chunks.clamp_max(chunks[view["valid"].to(device)].max())
+
+
 def source_chunk_ids(view, chunk_size):
     """Use the original Wan time windows, including the first shorter window."""
     chunks = ((view["frames"].cpu() + 3) / (4 * chunk_size)).floor().long()

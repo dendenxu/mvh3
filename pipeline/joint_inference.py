@@ -19,8 +19,12 @@ def joint_inputs(document, current, conditions, sigma, cfg, device, camera=True)
         local.h3.chunk_group_range = None
     if local.h3.get("chunk_size_range") is not None:
         local.h3.chunk_size_range = None
-    document = {**document, "views": [{k: v for k, v in view.items() if k != "generation_chunks"}
-                                      for view in document["views"]]}
+    views = []
+    for view in document["views"]:
+        joint_view = dict(view)
+        joint_view.pop("generation_chunks", None)
+        views.append(joint_view)
+    document = {**document, "views": views}
     state = dict(chunk=0, sigma=sigma, current=current, conditions=conditions, cached=True)
     inputs, _, _, records, _ = WorldViewsObjective(local).pack(document, device, inference=state)
     inputs["attention_mask"] = replace(inputs["attention_mask"], joint=True, history_dropout=None)
@@ -44,8 +48,10 @@ def generate(model, document, negative, cfg, device, steps=None, use_cache=None,
     model.eval()
     try:
         conditions = WorldViewsObjective(cfg).condition_latents(document, device)
-        current = [broadcast_scoped(torch.randn(v["latent"].shape, device=device, dtype=torch.float32), "sp")
-                   for v in document["views"]]
+        current = [
+            broadcast_scoped(torch.randn(v["latent"].shape, device=device, dtype=torch.float32), "sp")
+            for v in document["views"]
+        ]
         scheduler = MiniMaxH3Scheduler(shift=cfg.timestep_shift)
         scheduler.set_timesteps(steps or cfg.sampling_steps, device=device)
         for index, timestep in enumerate(scheduler.timesteps):
@@ -53,13 +59,13 @@ def generate(model, document, negative, cfg, device, steps=None, use_cache=None,
             velocity = model(**inputs).sample
             if observer is not None:
                 observer(index, inputs, velocity)
-            prediction = torch.cat([velocity[:, r["start"]:r["stop"]] for r in records], 1)
-            samples = torch.cat([patchify(current[r["view"]]) for r in records], 1)
+            prediction = torch.cat([velocity[:, record["start"]:record["stop"]] for record in records], 1)
+            samples = torch.cat([patchify(current[record["view"]]) for record in records], 1)
             updated = scheduler.step(prediction, timestep, samples, return_dict=False)[0]
             offset = 0
-            for r in records:
-                n = r["stop"] - r["start"]
-                current[r["view"]] = unpatchify(updated[:, offset:offset + n], r["shape"])
+            for record in records:
+                n = record["stop"] - record["start"]
+                current[record["view"]] = unpatchify(updated[:, offset:offset + n], record["shape"])
                 offset += n
         return [x.cpu() for x in current]
     finally:

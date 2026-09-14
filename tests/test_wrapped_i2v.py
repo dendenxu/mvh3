@@ -220,8 +220,8 @@ def test_decomposed_uses_later_frame_camera_in_every_original_layer():
 
 
 def test_video_only_padding_cannot_relay_into_video_or_text(monkeypatch):
-    import model.diffusion as diffusion
-    monkeypatch.setattr(diffusion, "get_sp_size", lambda: 8)
+    import model.packing as packing
+    monkeypatch.setattr(packing, "get_sp_size", lambda: 8)
     cfg, doc, model = recipe(), static_document(), tiny_model().eval()
     configure_model(model, cfg)
     inputs, _ = joint_inputs(doc, [doc["views"][0]["latent"]],

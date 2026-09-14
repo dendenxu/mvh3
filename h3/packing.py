@@ -102,3 +102,9 @@ def teacher_forcing_batch(features,
     loss_mask = torch.cat((torch.zeros_like(valid_video), valid_video & ~first_condition))[None]
     target = torch.cat((torch.zeros_like(clean), clean - noise), dim=1)
     return inputs, target, loss_mask
+
+
+def unpatchify(tokens, shape):
+    """Restore the latent volume from H3's 2x2 spatial patch tokens."""
+    _, channels, frames, height, width = shape
+    return tokens.reshape(frames, height // 2, width // 2, channels, 2, 2).permute(3, 0, 1, 4, 2, 5).reshape(shape)

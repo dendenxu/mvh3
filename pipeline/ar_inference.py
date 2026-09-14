@@ -37,7 +37,8 @@ def generate(model, document, negative, cfg, device, steps=None, use_cache=None)
     history = [torch.zeros_like(v["latent"], device=device) for v in document["views"]]
     generated = [x.clone() for x in history]
     chunks = [view_chunk_ids(v, cfg.chunk_size, device) for v in document["views"]]
-    n_chunks = max(int(c[v["valid"].to(device)].max()) + 1 for c, v in zip(chunks, document["views"]))
+    chunk_count = max(
+        int(frame_chunks[v["valid"].to(device)].max()) + 1 for frame_chunks, v in zip(chunks, document["views"]))
     context_noise = cfg.inference_context_noise if cfg.inference_context_noise is not None else cfg.context_noise
     # Native keyframe augmentation is drawn once per request, before target
     # noise, and held fixed across solver steps, CFG branches and cache writes.
@@ -52,36 +53,27 @@ def generate(model, document, negative, cfg, device, steps=None, use_cache=None)
         # sink/window eviction identical, this preserves native BF16 rounding:
         # one large prefix forward is not numerically equivalent on the 33B model.
         for previous in range(chunk):
-            state = dict(chunk=previous,
-                         sigma=0. if cfg.clean_adaln else context_noise,
-                         history=history,
-                         current=history,
-                         conditions=conditions,
-                         cached=True,
-                         update_cache=True)
+            state = dict(chunk=previous, sigma=0. if cfg.clean_adaln else context_noise, history=history,
+                         current=history, conditions=conditions, cached=True, update_cache=True)
             inputs, _, _, _, _ = objective.pack(doc, device, inference=state)
             model(**inputs, kv_caches=caches, update_cache=True)
         return caches
 
     try:
-        for chunk in range(n_chunks):
+        for chunk in range(chunk_count):
             current = [broadcast_scoped(torch.randn_like(x), "sp") for x in history]
             if native:
                 scheduler = MiniMaxH3Scheduler(shift=cfg.timestep_shift)
                 scheduler.set_timesteps(steps or cfg.sampling_steps, device=device)
             else:
                 scheduler = FlowUniPCMultistepScheduler(num_train_timesteps=cfg.num_train_timesteps,
-                                                        shift=cfg.timestep_shift,
-                                                        use_dynamic_shifting=False)
+                                                        shift=cfg.timestep_shift, use_dynamic_shifting=False)
                 scheduler.set_timesteps(steps or cfg.sampling_steps, device=device, shift=cfg.timestep_shift)
             for timestep in scheduler.timesteps:
                 pos_step_cache = positive_cache if positive_cache is not None else recompute_history(document, chunk)
                 state = dict(chunk=chunk,
                              sigma=1 - float(timestep) if native else float(timestep) / cfg.num_train_timesteps,
-                             history=history,
-                             current=current,
-                             conditions=conditions,
-                             cached=True)
+                             history=history, current=current, conditions=conditions, cached=True)
                 inputs, _, _, records, _ = objective.pack(document, device, inference=state)
                 positive = model(**inputs, kv_caches=pos_step_cache).sample
                 if cfg.guidance_scale != 1:
@@ -102,33 +94,29 @@ def generate(model, document, negative, cfg, device, steps=None, use_cache=None)
                     for cache in neg_step_cache:
                         cache.clear()
                 predictions, samples = [], []
-                for r in records:
-                    predictions.append(velocity[:, r["start"]:r["stop"]])
-                    samples.append(patchify(r["noisy"]))
+                for record in records:
+                    predictions.append(velocity[:, record["start"]:record["stop"]])
+                    samples.append(patchify(record["noisy"]))
                 packed = torch.cat(samples, 1)
                 # The original UniPC scheduler consumes noise-data velocity;
                 # native H3 produces data-noise. Convert only at this boundary.
                 prediction = torch.cat(predictions, 1)
                 updated = scheduler.step(prediction if native else -prediction, timestep, packed, return_dict=False)[0]
                 offset = 0
-                for r, part in zip(records, samples):
+                for record, part in zip(records, samples):
                     n = part.shape[1]
-                    current[r["view"]][:, :, r["selected"]] = unpatchify(updated[:, offset:offset + n], r["shape"])
+                    current[record["view"]][:, :, record["selected"]] = unpatchify(updated[:, offset:offset + n],
+                                                                                   record["shape"])
                     offset += n
-            for i, c in enumerate(chunks):
-                select = c == chunk
-                generated[i][:, :, select] = current[i][:, :, select]
+            for i, frame_chunks in enumerate(chunks):
+                selected = frame_chunks == chunk
+                generated[i][:, :, selected] = current[i][:, :, selected]
                 noise = broadcast_scoped(torch.randn_like(current[i]), "sp")
                 damped = (1 - context_noise) * current[i] + context_noise * noise
-                history[i][:, :, select] = damped[:, :, select]
+                history[i][:, :, selected] = damped[:, :, selected]
             if positive_cache is not None:
-                state = dict(chunk=chunk,
-                             sigma=0. if cfg.clean_adaln else context_noise,
-                             history=history,
-                             current=history,
-                             conditions=conditions,
-                             cached=True,
-                             update_cache=True)
+                state = dict(chunk=chunk, sigma=0. if cfg.clean_adaln else context_noise, history=history,
+                             current=history, conditions=conditions, cached=True, update_cache=True)
                 inputs, _, _, _, _ = objective.pack(document, device, inference=state)
                 model(**inputs, kv_caches=positive_cache, update_cache=True)
                 if negative_cache is not None and cfg.guidance_scale != 1:
