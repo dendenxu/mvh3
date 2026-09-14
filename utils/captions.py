@@ -22,7 +22,7 @@ def bind_caption_features(document, cfg):
                 **view,
                 "texts": [(chunk, value["features"]) for chunk, value in values],
                 "text": values[0][1]["features"],
-                "texts_by_bd": True,
+                "texts_by_diffusion_chunk": True,
                 "caption_specs": specs,
                 "text_tag_specs": {chunk: value["tags"] for chunk, value in values},
                 "text_tags": values[0][1]["tags"],

@@ -226,7 +226,10 @@ def prepare_clean_prefix(document, cfg, device):
 
 def caption_chunk(view, caption_id, source_chunk_size):
     """Retain each source caption and assign it to its enclosing diffusion block."""
-    if caption_id < 0 or "generation_chunks" not in view or view.get("texts_by_bd", False):
+
+    # Saved features may still use the old abbreviated field name.
+    texts_by_diffusion_chunk = view.get("texts_by_diffusion_chunk", view.get("texts_by_bd", False))
+    if caption_id < 0 or "generation_chunks" not in view or texts_by_diffusion_chunk:
         return caption_id
     indices = torch.nonzero(source_chunk_ids(view, source_chunk_size) == caption_id).flatten()
     if not len(indices):

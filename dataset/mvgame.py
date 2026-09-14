@@ -570,26 +570,33 @@ def compute_sequence_gamma(
     band = band if band is not None else MVGAME_LIFT_BAND
     if indices_by_view is not None and len(indices_by_view) != len(vrs):
         raise ValueError(f"indices_by_view has {len(indices_by_view)} entries for {len(vrs)} readers")
-    n_sv = max(1, min(n_sample_views, len(vrs)))
-    n_sf = max(1, min(n_sample_frames, len(indices)))
-    sv_inds = np.linspace(0, len(vrs) - 1, n_sv).astype(int)
-    sf_pos = np.linspace(0, len(indices) - 1, n_sf).astype(int)
+    sample_view_count = max(1, min(n_sample_views, len(vrs)))
+    sample_frame_count = max(1, min(n_sample_frames, len(indices)))
+    sample_views = np.linspace(0, len(vrs) - 1, sample_view_count).astype(int)
+    sample_positions = np.linspace(0, len(indices) - 1, sample_frame_count).astype(int)
     indices = np.asarray(indices)
-    sf_inds = (indices[sf_pos, 1] if indices.ndim == 2 else indices[sf_pos]).astype(int)
+    sample_frames = (indices[sample_positions, 1] if indices.ndim == 2 else indices[sample_positions]).astype(
+        int
+    )
 
     pooled = []
-    for sv in sv_inds:
-        view_sf_inds = sf_inds
+    for source_view in sample_views:
+        view_sample_frames = sample_frames
         if indices_by_view is not None:
-            view_indices = np.asarray(indices_by_view[int(sv)])
-            view_n_sf = max(1, min(n_sample_frames, len(view_indices)))
-            view_sf_pos = np.linspace(0, len(view_indices) - 1, view_n_sf).astype(int)
-            view_sf_inds = (
-                view_indices[view_sf_pos, 1] if view_indices.ndim == 2 else view_indices[view_sf_pos]
+            view_indices = np.asarray(indices_by_view[int(source_view)])
+            view_sample_count = max(1, min(n_sample_frames, len(view_indices)))
+            view_sample_positions = np.linspace(0, len(view_indices) - 1, view_sample_count).astype(int)
+            view_sample_frames = (
+                view_indices[view_sample_positions, 1]
+                if view_indices.ndim == 2
+                else view_indices[view_sample_positions]
             ).astype(int)
 
         # Quick decode at small resolution (ratio=0.1 like aug_views.py).
-        sampled = np.asarray(vrs[int(sv)].get_batch(view_sf_inds, ratio=0.1)).astype(np.float32) / 255.0
+        sampled = (
+            np.asarray(vrs[int(source_view)].get_batch(view_sample_frames, ratio=0.1)).astype(np.float32)
+            / 255.0
+        )
         pooled.append((sampled @ LUMA_BT601).ravel() if band.get("use_luma", True) else sampled.ravel())
     stat = np.concatenate(pooled)
     median = float(np.median(stat))

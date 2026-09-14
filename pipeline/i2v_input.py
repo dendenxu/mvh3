@@ -121,7 +121,7 @@ def prepare_request(request, root, video, text, cfg, chunked=None):
             view.update(
                 texts=[(chunk, value["features"]) for chunk, value in values],
                 text=values[0][1]["features"],
-                texts_by_bd=True,
+                texts_by_diffusion_chunk=True,
                 caption_specs=specs,
                 text_tag_specs={chunk: value["tags"] for chunk, value in values},
                 text_tags=values[0][1]["tags"],

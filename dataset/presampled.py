@@ -427,28 +427,31 @@ class PresampledDataset(Dataset):
         out = [None] * tfs
         by_cam = {}
         for t in range(tfs):
-            sv, sf = int(idx_arr_view[t, 0]), int(idx_arr_view[t, 1])
-            by_cam.setdefault(sv, []).append((t, sf))
+            source_view, source_frame = int(idx_arr_view[t, 0]), int(idx_arr_view[t, 1])
+            by_cam.setdefault(source_view, []).append((t, source_frame))
 
-        svs = list(by_cam.keys())
-        items_l = [by_cam[sv] for sv in svs]
-        paths = [join(scene_dir, "videos", cam_files[sv]) for sv in svs]
+        source_views = list(by_cam.keys())
+        items_by_camera = [by_cam[source_view] for source_view in source_views]
+        paths = [join(scene_dir, "videos", cam_files[source_view]) for source_view in source_views]
 
         def decode_cam(items, path):
             vr = self.get_reader(path, reader_name)
             n = len(vr)
-            uniq = sorted({min(sf, n - 1) for _, sf in items})
-            frames = vr.get_batch(uniq, return_channel_first=False, return_tensor=True)
-            fmap = dict(zip(uniq, frames))
-            return [(t, fmap[min(sf, n - 1)]) for t, sf in items]
+            unique_frames = sorted({min(source_frame, n - 1) for _, source_frame in items})
+            frames = vr.get_batch(unique_frames, return_channel_first=False, return_tensor=True)
+            frames_by_index = dict(zip(unique_frames, frames))
+            return [(t, frames_by_index[min(source_frame, n - 1)]) for t, source_frame in items]
 
-        if len(svs) <= 1:
-            rets = [decode_cam(items_l[0], paths[0])] if svs else []
+        if len(source_views) <= 1:
+            decoded_cameras = [decode_cam(items_by_camera[0], paths[0])] if source_views else []
         else:
-            rets = parallel_execution(
-                items_l, paths, action=decode_cam, num_workers=min(self.aug_decode_workers, len(svs))
+            decoded_cameras = parallel_execution(
+                items_by_camera,
+                paths,
+                action=decode_cam,
+                num_workers=min(self.aug_decode_workers, len(source_views)),
             )
-        for chunk in rets:
+        for chunk in decoded_cameras:
             for t, fr in chunk:
                 out[t] = fr
         return torch.stack(out), 1.0  # (F, H, W, 3)

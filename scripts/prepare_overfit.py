@@ -76,7 +76,8 @@ def main():
     for name in (
         "generation_chunks",
         "clean_prefix_chunks",
-        "texts_by_bd",
+        "texts_by_diffusion_chunk",
+        "texts_by_bd",  # Older feature files use this name.
         "texts",
         "text_tag_specs",
         "caption_specs",
@@ -88,7 +89,7 @@ def main():
         torch.save(documents, args.output / "documents.pt")
         shutil.copy2(args.features / "pixels_0.pt", args.output / "pixels_0.pt")
         metadata.update(
-            caption_policy="bd_overlap",
+            caption_policy="diffusion_chunk_overlap",
             caption_bank=list(captions),
             feature_parent_sha256=hashlib.sha256((args.features / "documents.pt").read_bytes()).hexdigest(),
             partition="resampled before each clean-prefix cut; contiguous caption feature bank",

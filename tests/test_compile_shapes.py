@@ -4,7 +4,7 @@ import torch
 import pytest
 from fixtures_h3 import tiny_model
 from test_worldviews import dense_inputs
-from test_diffusion_forcing import df_recipe, planned_document
+from test_diffusion_forcing import planned_document, diffusion_forcing_recipe
 
 from h3.compile_shapes import pad_camera
 from utils.config import validate_config
@@ -16,7 +16,7 @@ from h3.modules.camera import CameraBundle, camera_projection, precompute_camera
 @pytest.mark.parametrize("isolated", [False, True])
 def test_training_padding_preserves_data_noise_mask_predictions_and_gradients(isolated):
     torch.manual_seed(531)
-    cfg, doc = df_recipe(), planned_document(2)
+    cfg, doc = diffusion_forcing_recipe(), planned_document(2)
     doc["isolated"] = isolated
     cfg.history_dropout_ratio = 0.2
     cfg.context_noise, cfg.context_noise_std = 0.2, 0.1
@@ -92,7 +92,7 @@ def test_checkpointed_blocks_reuse_graphs_when_caption_lengths_change(monkeypatc
     monkeypatch.setattr(
         torch, "compile", lambda function, **kwargs: original_compile(function, backend=backend, **kwargs)
     )
-    cfg, doc = df_recipe(), planned_document()
+    cfg, doc = diffusion_forcing_recipe(), planned_document()
     cfg.attn_block_compile = cfg.gradient_checkpointing = True
     cfg.h3.checkpoint_outside_compile = True
     cfg.h3.training_shape_buckets = dict(tokens=128, timesteps=16, cameras=64, chunks=16)
@@ -123,7 +123,7 @@ def test_checkpointed_blocks_reuse_graphs_when_caption_lengths_change(monkeypatc
 
 @pytest.mark.parametrize("buckets", [{"tokens": 0}, {"tokens": True}, {"cameras": -1}, {"unknown": 8}, [8]])
 def test_invalid_shape_buckets_fail_before_training(buckets):
-    cfg = df_recipe()
+    cfg = diffusion_forcing_recipe()
     cfg.h3.training_shape_buckets = buckets
     with pytest.raises(ValueError, match="[Bb]ucket"):
         validate_config(cfg)

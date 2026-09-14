@@ -117,7 +117,7 @@ class BatchLoader:
         for view in document["views"]:
             pairs = caption_specs(view, self.cfg)
             if self.cfg.h3.get("single_sequence", False):
-                view["texts_by_bd"] = True
+                view["texts_by_diffusion_chunk"] = True
                 view["caption_specs"] = pairs
             view_specs = []
             for chunk, caption in pairs:

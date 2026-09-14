@@ -17,7 +17,7 @@ from model.chunks import prepare_chunk_plan, prepare_clean_prefix
 from h3.modules.masking import CLEAN, NOISY, CONDITION, TokenLayout
 
 
-def df_recipe():
+def diffusion_forcing_recipe():
     cfg = recipe()
     cfg.h3.single_sequence = True
     cfg.h3.chunk_size_range = [3, 20]
@@ -35,14 +35,14 @@ def planned_document(views=1):
     for view in doc["views"]:
         view["generation_chunks"] = torch.repeat_interleave(torch.arange(4), torch.tensor([5, 5, 5, 12]))
         view["clean_prefix_chunks"] = 1
-        view["texts_by_bd"] = True
+        view["texts_by_diffusion_chunk"] = True
         view["texts"] = [(i, torch.randn(1, 3, 32)) for i in range(4)]
     return doc
 
 
 @pytest.mark.parametrize("frames", [1, 5, 10, 17, 22, 37, 77, 137, 297])
 def test_random_sizes_are_final_before_the_clean_cut(frames):
-    cfg, original = df_recipe(), feature_document(frames=frames)
+    cfg, original = diffusion_forcing_recipe(), feature_document(frames=frames)
     for seed in range(12):
         torch.manual_seed(seed)
         planned = prepare_chunk_plan(original, cfg, "cpu", synchronize=False)
@@ -59,8 +59,11 @@ def test_random_sizes_are_final_before_the_clean_cut(frames):
         assert torch.equal(state, torch.get_rng_state())
 
 
-def test_single_video_copy_clean_prefix_and_per_chunk_noise():
-    cfg, doc = df_recipe(), planned_document(2)
+@pytest.mark.parametrize("caption_field", ["texts_by_diffusion_chunk", "texts_by_bd"])
+def test_single_video_copy_clean_prefix_and_per_chunk_noise(caption_field):
+    cfg, doc = diffusion_forcing_recipe(), planned_document(2)
+    for view in doc["views"]:
+        view[caption_field] = view.pop("texts_by_diffusion_chunk")
     doc["isolated"] = True
     objective = DiffusionObjective(cfg)
     objective.sample_sigmas = lambda count, device: (
@@ -92,7 +95,7 @@ def test_single_video_copy_clean_prefix_and_per_chunk_noise():
 
 
 def test_joint_variable_lengths_keep_chunk_bounds_and_decoder_support():
-    cfg, doc = df_recipe(), feature_document(views=3, frames=137)
+    cfg, doc = diffusion_forcing_recipe(), feature_document(views=3, frames=137)
     doc["views"][0] = feature_document(frames=37)["views"][0]
     doc["views"][1] = feature_document(frames=77)["views"][0]
     for seed in range(20):
@@ -110,7 +113,7 @@ def test_joint_variable_lengths_keep_chunk_bounds_and_decoder_support():
 
 @pytest.mark.parametrize("sizes", [[21, 6], [13, 13, 1]])
 def test_saved_native_partition_validates_all_chunk_sizes(sizes):
-    cfg, doc = df_recipe(), feature_document(views=2, frames=77)
+    cfg, doc = diffusion_forcing_recipe(), feature_document(views=2, frames=77)
     for view in doc["views"]:
         view["valid"] = torch.ones(27, dtype=torch.bool)
         view["generation_chunks"] = torch.repeat_interleave(torch.arange(len(sizes)), torch.tensor(sizes))
@@ -139,7 +142,7 @@ def test_shared_causality_all_modalities_and_grouped_backward_edges():
 
 
 def test_future_video_and_caption_length_cannot_change_earlier_blocks():
-    cfg, doc, model = df_recipe(), planned_document(), tiny_model()
+    cfg, doc, model = diffusion_forcing_recipe(), planned_document(), tiny_model()
     model.configure_attention(cfg)
     changed = deepcopy(doc)
     changed["views"][0]["texts"][-1] = (3, torch.randn(1, 11, 32) * 50)
@@ -159,7 +162,7 @@ def test_future_video_and_caption_length_cannot_change_earlier_blocks():
 
 
 def test_caption_majority_is_strict_and_uses_original_caption_duration():
-    cfg = df_recipe()
+    cfg = diffusion_forcing_recipe()
 
     # A synthetic frame clock makes exact majority/tie boundaries explicit.
     view = dict(
@@ -190,7 +193,7 @@ def test_caption_majority_is_strict_and_uses_original_caption_duration():
 
 
 def test_short_piece_uses_its_sliced_motions_without_parent_narrative_or_labels():
-    cfg, view = df_recipe(), planned_document()["views"][0]
+    cfg, view = diffusion_forcing_recipe(), planned_document()["views"][0]
     view.update(
         caption_scene="A street.",
         caption_motions=["Turn.", "Stop.", "Wait.", "Leave."],
@@ -207,7 +210,7 @@ def test_short_piece_uses_its_sliced_motions_without_parent_narrative_or_labels(
 
 
 def test_resampling_forcing_promotes_predicted_block_and_resume_keeps_both_plan_and_cut(tmp_path):
-    cfg, document = df_recipe(), planned_document()
+    cfg, document = diffusion_forcing_recipe(), planned_document()
     cfg.resampling_forcing = True
     cfg.resampling_forcing_warmup_steps = 0
     cfg.resampling_forcing_clean_chunks = 0
@@ -245,7 +248,7 @@ def test_default_diffusion_forcing_resampling_does_not_replace_its_first_predict
 
     default = load_config(Path(__file__).resolve().parents[1] / "configs/diffusion_forcing.yaml")
     assert default.resampling_forcing_clean_chunks == 0
-    cfg, document = df_recipe(), planned_document(2)
+    cfg, document = diffusion_forcing_recipe(), planned_document(2)
     cfg.resampling_forcing = True
     cfg.resampling_forcing_warmup_steps = 0
     cfg.resampling_forcing_clean_chunks = default.resampling_forcing_clean_chunks
@@ -268,7 +271,7 @@ def test_default_diffusion_forcing_resampling_does_not_replace_its_first_predict
 
 
 def test_inference_never_samples_or_reads_ground_truth_clean_prefix():
-    cfg, doc = df_recipe(), planned_document()
+    cfg, doc = diffusion_forcing_recipe(), planned_document()
     view = doc["views"][0]
     view.pop("clean_prefix_chunks")
     objective = DiffusionObjective(cfg)
@@ -295,7 +298,7 @@ def test_source_stream_encodes_the_plan_before_sampling_a_clean_prefix(monkeypat
     from dataset.loader import BatchLoader
     from utils import distributed as groups
 
-    cfg, raw = df_recipe(), feature_document(frames=77)
+    cfg, raw = diffusion_forcing_recipe(), feature_document(frames=77)
     cfg.h3.text_conditioning = "text_only"
     cfg.cond_text_dropout_ratio = 0.0
     view = raw["views"][0]
@@ -325,7 +328,7 @@ def test_source_stream_encodes_the_plan_before_sampling_a_clean_prefix(monkeypat
     document = stream.next()
     planned = captured[0]["views"][0]
     assert "generation_chunks" in planned and "clean_prefix_chunks" not in planned
-    assert planned["texts_by_bd"]
+    assert planned["texts_by_diffusion_chunk"]
     assert requests[:-1] == [caption for _, caption in caption_specs(planned, cfg)]
     trained = DiffusionObjective(cfg).prepare_document(document, "cpu")
     assert torch.equal(trained["views"][0]["generation_chunks"], planned["generation_chunks"])
@@ -337,7 +340,7 @@ def test_cache_keeps_each_past_caption_once_with_its_clean_media(monkeypatch):
     original = flex.create_block_mask
     monkeypatch.setattr(flex, "create_block_mask", lambda *a, **kw: original(*a, **{**kw, "_compile": False}))
     cache = HistoryCache(offload=False)
-    cfg, document = df_recipe(), planned_document()
+    cfg, document = diffusion_forcing_recipe(), planned_document()
     objective = DiffusionObjective(cfg)
     with torch.no_grad():
         for chunk in range(4):
@@ -363,7 +366,7 @@ def test_cache_keeps_each_past_caption_once_with_its_clean_media(monkeypatch):
 
 
 def test_independent_and_joint_views_cut_only_after_their_shared_partition():
-    cfg, document = df_recipe(), feature_document(views=3, frames=137)
+    cfg, document = diffusion_forcing_recipe(), feature_document(views=3, frames=137)
     torch.manual_seed(31)
     joint = DiffusionObjective(cfg).prepare_document(document, "cpu")
     first = joint["views"][0]
@@ -381,7 +384,9 @@ def test_independent_and_joint_views_cut_only_after_their_shared_partition():
 @pytest.mark.parametrize(
     "views,isolated,offload", [(1, True, False), (2, False, False), (2, True, False), (2, False, True)]
 )
-def test_df_cache_and_recompute_rollout_agree_with_causal_text(monkeypatch, views, isolated, offload):
+def test_diffusion_forcing_cache_and_recompute_rollout_agree_with_causal_text(
+    monkeypatch, views, isolated, offload
+):
     import torch.nn.attention.flex_attention as flex
 
     import h3.modules.model as module
@@ -396,7 +401,7 @@ def test_df_cache_and_recompute_rollout_agree_with_causal_text(monkeypatch, view
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
     monkeypatch.setattr(module, "compiled_flex_attention", dense_attention)
-    cfg, doc, model = df_recipe(), planned_document(views), tiny_model()
+    cfg, doc, model = diffusion_forcing_recipe(), planned_document(views), tiny_model()
     doc["isolated"] = isolated
     if not isolated:
         for view in doc["views"][1:]:
@@ -413,7 +418,7 @@ def test_df_cache_and_recompute_rollout_agree_with_causal_text(monkeypatch, view
 
 
 def test_single_sequence_recipe_rejects_caption_modes_and_conflicting_partitions():
-    cfg = df_recipe()
+    cfg = diffusion_forcing_recipe()
     validate_config(cfg)
     cfg.h3.caption_mode = "global"
     with pytest.raises(ValueError, match="Caption modes"):
@@ -431,7 +436,7 @@ def test_raw_i2v_request_uses_actual_fps_and_the_training_caption_partition(tmp_
     from h3.data import temporal_layout
     from pipeline.i2v_input import prepare_request
 
-    cfg = df_recipe()
+    cfg = diffusion_forcing_recipe()
     Image.new("RGB", (32, 32)).save(tmp_path / "image.png")
     camera = np.zeros((77, 10), np.float32)
     camera[:, :2] = 1.0
@@ -467,7 +472,7 @@ def test_raw_i2v_request_uses_actual_fps_and_the_training_caption_partition(tmp_
 
 
 def test_fixed_video_feature_bank_rebinds_captions_after_each_new_partition():
-    cfg, doc = df_recipe(), feature_document(frames=77)
+    cfg, doc = diffusion_forcing_recipe(), feature_document(frames=77)
     view = doc["views"][0]
     motions = ["Walk.", "Stop.", "Turn.", "Wave."]
     captions = ["A room."] + [
