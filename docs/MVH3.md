@@ -157,9 +157,19 @@ changes do not flush it; explicit warmup and interval settings control cleanup.
 
 The text refiner keeps actual caption lengths. Its sparse mask reduction and
 Triton flex attention compile with dynamic shapes, so a new caption length can
-reuse the compiled graphs. Main joint attention keeps its static buckets and
-original FA4 path. Both the text mask and attention need symbolic lengths;
-marking only Q/K/V dynamic leaves static `BlockMask.seq_lengths` constraints.
+reuse the compiled graphs. Main blocks explicitly mark sequence, timestep and
+camera-table lengths dynamic after SP/device transfer. Batch, head and feature
+dimensions stay static. The attention FSDP pre-hook marks the norm output too:
+tensor annotations do not survive a compiled graph's output boundary. SP shape
+inference preserves sequence arithmetic instead of casting its lengths to `int`.
+
+The existing padding buckets and original FA4 kernels remain in use. Mask grids
+have dynamic row/column counts and fixed block sizes. H3 supplies mask bounds as
+a fixed three-integer tensor, because the current CuTe template cannot lower
+symbolic shape arithmetic inside the mask callback. Compiled attention derives
+`BlockMask.seq_lengths` from Q/K rather than capturing each batch's Python ints;
+the precomputed grid and visibility rules are unchanged. Inference retains its
+native specialization and the exact neutral-camera bypass.
 
 `utils/gpu_metrics.py` samples hardware SM, tensor-core and memory activity in a
 background thread. `Tracker.training` records averages across every GPU in

@@ -224,18 +224,14 @@ def all_to_all_op(x: torch.Tensor, scatter_dim: int, gather_dim: int) -> torch.T
 
 @all_to_all_op.register_fake
 def all_to_all_fake(x: torch.Tensor, scatter_dim: int, gather_dim: int) -> torch.Tensor:
-    """Tell torch.compile the output shape without running the actual op.
-
-    Uses int() on input dims to produce concrete (non-symbolic) output shapes.
-    This creates guards that specialize on the current sizes — if sizes change,
-    torch.compile recompiles (which is fine since SP topology is fixed).
-    Without this, scatter_dim // sp_size produces a symbolic floor() expression
-    that flex_attention's inductor lowering can't handle (bitwise & on sympy floor).
-    """
+    """Preserve symbolic sequence lengths across the SP communication boundary."""
     sp_size = get_sp_size()
     shape = list(x.shape)
-    shape[scatter_dim] = int(shape[scatter_dim]) // sp_size
-    shape[gather_dim] = int(shape[gather_dim]) * sp_size
+    # Head geometry is marked static by the attention processor. Casting the
+    # sequence axis to int here would undo its dynamic marker on every block.
+    torch._check(shape[scatter_dim] % sp_size == 0)
+    shape[scatter_dim] = shape[scatter_dim] // sp_size
+    shape[gather_dim] = shape[gather_dim] * sp_size
     return x.new_empty(shape)
 
 

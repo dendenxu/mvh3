@@ -1,7 +1,7 @@
 """Explicit H3 attention kernels: SDPA for dense masks, compiled flex for sparse masks."""
 
 import torch
-from torch.nn.attention.flex_attention import flex_attention
+from torch.nn.attention.flex_attention import BlockMask, flex_attention
 
 
 def sparse_attention(query, key, value, block_mask, kernel_options=None):
@@ -10,10 +10,26 @@ def sparse_attention(query, key, value, block_mask, kernel_options=None):
         raise RuntimeError(
             "Sparse H3 attention requires compilation; increase the variant limit or fix the graph"
         )
-    if hasattr(block_mask, "h3_visibility_groups"):
+    plan = getattr(block_mask, "h3_visibility_groups", None)
+    if getattr(block_mask, "h3_dynamic_shapes", False):
+        # H3 constructs this mask for the packed Q/K rows. Bind its length
+        # metadata to their symbolic axes without copying or rebuilding the grid.
+        block_mask = BlockMask(
+            (query.shape[-2], key.shape[-2]),
+            block_mask.kv_num_blocks,
+            block_mask.kv_indices,
+            block_mask.full_kv_num_blocks,
+            block_mask.full_kv_indices,
+            block_mask.q_num_blocks,
+            block_mask.q_indices,
+            block_mask.full_q_num_blocks,
+            block_mask.full_q_indices,
+            block_mask.BLOCK_SIZE,
+            block_mask.mask_mod,
+        )
+    if plan is not None:
         from h3.modules.grouped_attention import GroupedFlexAttention, MetadataGroupedFlexAttention
 
-        plan = block_mask.h3_visibility_groups
         if plan.sizes is not None:
             return MetadataGroupedFlexAttention.apply(
                 query,

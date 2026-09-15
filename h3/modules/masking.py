@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
+from h3.compile_shapes import mark_mask_dimensions, mark_layout_dimensions
+
 CONDITION = 0
 CLEAN = 1
 NOISY = 2
@@ -108,6 +110,14 @@ class TokenLayout:
             # preserves the same mask with a unique contiguous dimension.
             object.__setattr__(self, "_history_dropout_flat", self.history_dropout.reshape(-1))
 
+        # FA4 can load runtime bounds from a tensor, but its Inductor template
+        # cannot lower symbolic shape arithmetic inside the mask callback.
+        history_shape = (0, 0) if self.history_dropout is None else self.history_dropout.shape
+        dimensions = (self.kind.numel(), *history_shape)
+        object.__setattr__(
+            self, "mask_dimensions", torch.tensor(dimensions, dtype=torch.int32, device=self.kind.device)
+        )
+
     def to(self, device):
         return type(self)(
             self.kind.to(device),
@@ -123,7 +133,7 @@ class TokenLayout:
 
     def mask_mod(self, batch, head, query, key):
         # Padded flex-attention blocks may evaluate indices beyond the real sequence.
-        size = self.kind.shape[0]
+        size = self.mask_dimensions[0]
         valid = (query < size) & (key < size)
         q, k = query.clamp_max(size - 1).to(torch.int32), key.clamp_max(size - 1).to(torch.int32)
         qkind, kkind = self.kind[q], self.kind[k]
@@ -135,11 +145,11 @@ class TokenLayout:
             clean = clean & (kchunk == qchunk)
             previous = previous & False
         if self.history_dropout is not None:
-            n, m = self.history_dropout.shape
+            n, m = self.mask_dimensions[1], self.mask_dimensions[2]
 
             # FA4/CuTe indirect buffer indices must be Int32, including values
             # loaded from the canonical int64 layout tensors.
-            drop_index = qchunk.clamp(0, n - 1) * m + kchunk.clamp(0, m - 1)
+            drop_index = qchunk.clamp_min(0).clamp_max(n - 1) * m + kchunk.clamp_min(0).clamp_max(m - 1)
             drop = self._history_dropout_flat[drop_index.to(torch.int32)]
             previous = previous & ~drop
         current = (qkind == NOISY) & (kkind == NOISY) & (kchunk == qchunk)
@@ -175,7 +185,9 @@ class TokenLayout:
             raise ValueError("Dense mask exceeds the bounded reference size; use block_mask")
         return self.mask_mod(0, 0, indices[:, None], indices[None, :])
 
-    def block_mask(self, indices: torch.Tensor | None = None, block_size=128):
+    def block_mask(self, indices: torch.Tensor | None = None, block_size=128, *, dynamic_shapes=False):
+        if dynamic_shapes:
+            mark_layout_dimensions(self)
         if indices is None:
             size = self.kind.numel()
 
@@ -192,6 +204,15 @@ class TokenLayout:
 
         # Text subsets keep their actual lengths even when the joint sequence is
         # bucketed. Compile their mask reduction with symbolic lengths too.
-        return build_block_mask(
-            mask_mod, size, size, self.kind.device, block_size, dynamic_shapes=indices is not None
+        mask = build_block_mask(
+            mask_mod,
+            size,
+            size,
+            self.kind.device,
+            block_size,
+            dynamic_shapes=dynamic_shapes or indices is not None,
         )
+        if dynamic_shapes:
+            mark_mask_dimensions(mask)
+            mask.h3_dynamic_shapes = True
+        return mask

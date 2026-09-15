@@ -6,10 +6,11 @@ from fixtures_h3 import tiny_model
 from test_worldviews import dense_inputs
 from test_diffusion_forcing import planned_document, diffusion_forcing_recipe
 
-from h3.compile_shapes import pad_camera
+from utils import distributed as groups
 from utils.config import validate_config
 from h3.distributed.fsdp import compile_blocks
 from model.diffusion import DiffusionObjective
+from h3.compile_shapes import pad_camera, mark_tensor_dimensions
 from h3.modules.camera import CameraBundle, camera_projection, precompute_camera
 
 
@@ -119,6 +120,29 @@ def test_checkpointed_blocks_reuse_graphs_when_caption_lengths_change(monkeypatc
         counts.append(len(compiled_graphs))
     assert counts[0] > 0
     assert counts == [counts[0]] * len(counts)
+
+
+def test_sequence_parallel_shape_inference_reuses_graph_across_lengths(monkeypatch):
+    monkeypatch.setattr(groups, "sp_size", 8)
+    graphs = []
+
+    def backend(graph, example_inputs):
+        graphs.append(graph)
+        return graph.forward
+
+    def round_trip(value):
+        gathered = groups.all_to_all_fake(value, scatter_dim=2, gather_dim=1)
+        restored = groups.all_to_all_fake(gathered, scatter_dim=1, gather_dim=2)
+        return gathered, restored
+
+    compiled = torch.compile(round_trip, backend=backend, dynamic=False, fullgraph=True)
+    for length in (13, 27, 41, 19):
+        value = torch.empty(1, length, 56, 128)
+        mark_tensor_dimensions(value, (1,))
+        gathered, restored = compiled(value)
+        assert gathered.shape == (1, length * 8, 7, 128)
+        assert restored.shape == value.shape
+    assert len(graphs) == 1
 
 
 @pytest.mark.parametrize("buckets", [{"tokens": 0}, {"tokens": True}, {"cameras": -1}, {"unknown": 8}, [8]])

@@ -9,6 +9,15 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import CPUOffload, MixedPrecision, ShardingStrategy
 
 from utils import distributed as groups
+from h3.compile_shapes import mark_tensor_dimensions
+
+
+@torch.compiler.disable
+def mark_attention_input(module, args):
+    # FSDP starts a new graph after the compiled norm/modulation. Mark that
+    # actual activation too; tensor annotations do not follow graph outputs.
+    if torch.is_grad_enabled():
+        mark_tensor_dimensions(args[0], (1,))
 
 
 def fsdp_options(cfg, mixed=True, text=False):
@@ -91,12 +100,15 @@ def compile_blocks(model, cfg):
         torch._inductor.config.emulate_precision_casts = True
     model.gradient_checkpointing = False
     model.blocks_checkpointed = bool(cfg.gradient_checkpointing)
+    model.compiled_training = bool(cfg.attn_block_compile)
     for block in model.transformer_blocks:
+        target = block.module if isinstance(block, FSDP) else block
+        if cfg.attn_block_compile and isinstance(target.attn, FSDP):
+            target.attn.register_forward_pre_hook(mark_attention_input)
         outside = bool(cfg.h3.get("checkpoint_outside_compile", False))
         if outside and cfg.attn_block_compile:
             # FSDP mutates its runtime state. Keep it outside checkpoint HOP
             # tracing, as in WorldViews, and compile the original block math.
-            target = block.module if isinstance(block, FSDP) else block
             target.forward = torch.compile(target.forward, dynamic=False)
         original = block.forward
 

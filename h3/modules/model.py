@@ -20,8 +20,8 @@ import torch.nn as nn
 from torch.nn.attention.flex_attention import BlockMask
 
 from utils.config import model_config
-from h3.compile_shapes import pad_camera
 from h3.modules.masking import TokenLayout
+from h3.compile_shapes import pad_camera, mark_camera_dimensions, mark_tensor_dimensions
 from h3.modules.attention import dispatch_attention_fn, dynamic_flex_attention, compiled_flex_attention
 from h3.modules.layers import (
     Timesteps,
@@ -209,6 +209,12 @@ class MiniMaxH3AttnProcessor:
         query = query.unflatten(-1, (attn.heads, -1))
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
+
+        # Only sequence rows vary. Keep FA4's head geometry specialized even
+        # when this processor is traced from a symbolic block input.
+        for tensor in (query, key, value):
+            for dimension in (0, 2, 3):
+                torch._dynamo.mark_static(tensor, dimension)
 
         query = attn.norm_q(query)
         key = attn.norm_k(key)
@@ -908,6 +914,7 @@ class MiniMaxH3Transformer3DModel(nn.Module):
         if torch.is_grad_enabled():
             camera = pad_camera(camera, getattr(self, "training_shape_buckets", {}).get("cameras", 0))
         local_inputs = {}
+        compiled_training = torch.is_grad_enabled() and getattr(self, "compiled_training", False)
 
         # Keep inference's native block representation; this only selects the
         # original FA4 backward tile used by gradient-enabled training.
@@ -933,7 +940,9 @@ class MiniMaxH3Transformer3DModel(nn.Module):
             block_device = hidden_states.device if sequence_parallel else next(block.parameters()).device
             if block_device not in local_inputs:
                 mask = (
-                    layout.to(block_device).block_mask(block_size=block_size)
+                    layout.to(block_device).block_mask(
+                        block_size=block_size, dynamic_shapes=compiled_training
+                    )
                     if layout is not None
                     else attention_mask
                 )
@@ -943,8 +952,13 @@ class MiniMaxH3Transformer3DModel(nn.Module):
                         getattr(self, "dynamic_grouped_metadata", False),
                         getattr(self, "grouped_attention_deterministic", False),
                     )
+                    if compiled_training:
+                        mark_tensor_dimensions(mask.h3_visibility_groups.query, (0,))
+                        mark_tensor_dimensions(mask.h3_visibility_groups.sizes)
                 if mask is not None and layout is None:
                     mask = mask.to(block_device)
+                    if compiled_training and isinstance(mask, torch.Tensor):
+                        mark_tensor_dimensions(mask, (mask.ndim - 2, mask.ndim - 1))
                 local_inputs[block_device] = (
                     temb.to(block_device),
                     adaln_indices.to(block_device),
@@ -953,7 +967,22 @@ class MiniMaxH3Transformer3DModel(nn.Module):
                     camera.to(block_device) if camera is not None else None,
                     camera_indices.to(block_device) if camera_indices is not None else None,
                 )
+                if compiled_training:
+                    local_time, local_adaln, local_rotary, _, local_camera, local_camera_indices = (
+                        local_inputs[block_device]
+                    )
+                    mark_tensor_dimensions(local_time, (0,))
+                    mark_tensor_dimensions(local_adaln, (0,))
+                    for value in local_rotary:
+                        mark_tensor_dimensions(value, (0,))
+                    mark_camera_dimensions(local_camera)
+                    mark_tensor_dimensions(local_camera_indices, (0,))
             hidden_states = hidden_states.to(block_device)
+
+            # Mark the actual post-transfer/SP tensors before entering FSDP or
+            # checkpoint tracing. Each block produces a new activation tensor.
+            if compiled_training:
+                mark_tensor_dimensions(hidden_states, (1,))
             cache_args = (
                 () if kv_caches is None else (kv_caches[block_index], layout.to(block_device), update_cache)
             )
