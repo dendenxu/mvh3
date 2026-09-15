@@ -149,9 +149,9 @@ original FA4 runtime and FSDP boundaries. The grouped backward path belongs to
 H3: queries with identical visible K/V share native varlen backward calls.
 AdamW clears gradients in place, retaining their CPU storage so FSDP does not
 reconstruct the flat gradient during backward.
-The managed HR launcher fixes Torch/OMP/MKL at four CPU threads per rank for
-offloaded AdamW and EMA. The main and autograd threads must use the same count
-throughout the run; changing it during updates invalidates compile guards.
+The managed HR launcher fixes Torch/OMP/MKL at one CPU thread per rank, matching
+DataLoader's pin-memory thread. Main/autograd thread counts must agree so
+checkpoint recomputation reuses the same compiled graph as the forward pass.
 The CUDA allocator also retains buffers across source samples. Caption length
 changes do not flush it; explicit warmup and interval settings control cleanup.
 
