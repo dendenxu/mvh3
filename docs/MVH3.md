@@ -152,6 +152,9 @@ reconstruct the flat gradient during backward.
 The managed HR launcher fixes Torch/OMP/MKL at one CPU thread per rank, matching
 DataLoader's pin-memory thread. Main/autograd thread counts must agree so
 checkpoint recomputation reuses the same compiled graph as the forward pass.
+`cpu_update_threads=4` parallelizes CPU clipping, AdamW and EMA after backward;
+the trainer restores the model's thread count before any further forward or
+checkpoint execution. This runtime setting does not change the checkpoint recipe.
 The CUDA allocator also retains buffers across source samples. Caption length
 changes do not flush it; explicit warmup and interval settings control cleanup.
 

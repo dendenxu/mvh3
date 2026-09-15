@@ -5,7 +5,7 @@ import json
 import time
 from pathlib import Path
 from functools import partial
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 
 import torch
 import torch.distributed as dist
@@ -24,6 +24,22 @@ from utils.ema import ShardedEMA, inference_weight_kind
 from h3.modules.model import MiniMaxH3Transformer3DModel
 from utils.checkpoint import rng_state, restore_rng, load_checkpoint, save_checkpoint
 from h3.distributed.fsdp import wrap_text, wrap_model, compile_blocks, load_compile_cache, save_compile_cache
+
+
+@contextmanager
+def cpu_update_threads(count):
+    """Parallelize CPU updates while preserving compiled model thread guards."""
+    previous = torch.get_num_threads()
+    if count == previous:
+        yield
+        return
+    torch.set_num_threads(count)
+    try:
+        yield
+    finally:
+        # Checkpoint recomputation uses an autograd worker with the model's
+        # original thread count. Restore it before the next model execution.
+        torch.set_num_threads(previous)
 
 
 class DiffusionTrainer:
@@ -216,7 +232,8 @@ class DiffusionTrainer:
 
         # FSDP computes the norm across parameter shards. A local torch norm
         # would clip each shard differently and change the global update.
-        norm = self.model.clip_grad_norm_(cfg.clip_grad_norm)
+        with cpu_update_threads(cfg.get("cpu_update_threads", 1)):
+            norm = self.model.clip_grad_norm_(cfg.clip_grad_norm)
         if not torch.isfinite(norm):
             raise FloatingPointError(f"Nonfinite gradient at step {self.step}")
         clipping_finished = time.monotonic()
@@ -231,11 +248,12 @@ class DiffusionTrainer:
         if cfg.warmup_steps:
             for group in self.optimizer.param_groups:
                 group["lr"] = group["initial_lr"] * min(1.0, (self.step + 1) / cfg.warmup_steps)
-        self.optimizer.step()
-        ema_started = time.monotonic()
-        if self.ema is not None:
-            self.ema.update(self.model)
-            log.update(ema_updates=self.ema.num_updates, ema_decay=self.ema.current_decay)
+        with cpu_update_threads(cfg.get("cpu_update_threads", 1)):
+            self.optimizer.step()
+            ema_started = time.monotonic()
+            if self.ema is not None:
+                self.ema.update(self.model)
+                log.update(ema_updates=self.ema.num_updates, ema_decay=self.ema.current_decay)
         timings["ema_seconds"] = time.monotonic() - ema_started
 
         # Step 4: Agree whether to reuse this sequence for resampling forcing.

@@ -2,6 +2,10 @@ parents: [worldviews.yaml]
 ema_weight: 0.995
 ema_cpu_offload: true
 ema_warmup: false
+
+# Model execution stays at one thread; only CPU clipping, AdamW and EMA use four.
+cpu_update_threads: 4
+
 # Retain sparse FA4 forward and use native varlen backward for visibility groups.
 h3:
   grouped_attention_backward: true

@@ -32,7 +32,7 @@ def stage_dataset_config(cfg, stage, validation=False):
 
 
 def recipe_digest(cfg):
-    """Allow stage/log paths to change, but reject accidental recipe drift on resume."""
+    """Reject training-recipe drift while allowing execution-only settings to change."""
     from h3.modules.camera import TRANSLATION_FREQUENCIES
 
     data = OmegaConf.to_container(cfg, resolve=True)
@@ -54,12 +54,15 @@ def recipe_digest(cfg):
         "inference_protocol",
         "inference_weights",
         "validation_weights",
+        "cpu_update_threads",
     ):
         data.pop(key, None)
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
 def validate_config(cfg):
+    if type(cfg.get("cpu_update_threads", 1)) is not int or cfg.get("cpu_update_threads", 1) < 1:
+        raise ValueError("CPU update threads must be a positive integer")
     if not isinstance(cfg.h3.get("checkpoint_outside_compile", False), bool):
         raise ValueError("H3 checkpoint_outside_compile must be a boolean")
     buckets = cfg.h3.get("training_shape_buckets", {})
