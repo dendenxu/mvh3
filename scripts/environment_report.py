@@ -37,6 +37,7 @@ def record_environment():
         host=socket.gethostname(),
         python=sys.executable,
         torch=torch.__version__,
+        torch_num_threads=torch.get_num_threads(),
         fa4_source_files=len(reference["files"]),
         fa4_mismatches=mismatches,
         byted_wandb=metadata.version("byted-wandb"),

@@ -33,7 +33,7 @@ train = [
     "pycountry",
     "numpy>=1.26", "scipy>=1.10", "pyarrow>=17",
     "opencv-python-headless>=4.10", "pillow", "av", "torchcodec",
-    "matplotlib", "rich", "tqdm", "byted-wandb",
+    "matplotlib", "rich", "tqdm", "byted-wandb", "nvidia-ml-py>=12.535",
     "ninja", "pybind11",
     "flash-attn-4==4.0.0b18", "nvidia-cutlass-dsl==4.5.2",
 ]

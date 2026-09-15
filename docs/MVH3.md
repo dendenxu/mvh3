@@ -86,6 +86,10 @@ coordinates and spatial loss weights. `generation_chunks` maps every latent to
 a block; `clean_prefix_chunks` is the cut. These fields also travel with pending
 resampling forcing/checkpoint state. Packing uses these concrete tensors directly.
 
+Presampled camera preload selects shard rows within each Parquet row group by
+index, then copies Arrow's numeric buffers into writable float32 arrays. It
+keeps the same row IDs and values without converting every scalar to Python.
+
 Source captions retain their original Wan windows: the first has 17 source
 frames, later windows have 20. Include a motion sentence only when a generated
 block covers strictly more than half its source window; exact ties are excluded.
@@ -145,6 +149,9 @@ original FA4 runtime and FSDP boundaries. The grouped backward path belongs to
 H3: queries with identical visible K/V share native varlen backward calls.
 AdamW clears gradients in place, retaining their CPU storage so FSDP does not
 reconstruct the flat gradient during backward.
+The managed HR launcher fixes Torch/OMP/MKL at four CPU threads per rank for
+offloaded AdamW and EMA. The main and autograd threads must use the same count
+throughout the run; changing it during updates invalidates compile guards.
 The CUDA allocator also retains buffers across source samples. Caption length
 changes do not flush it; explicit warmup and interval settings control cleanup.
 
@@ -153,6 +160,13 @@ Triton flex attention compile with dynamic shapes, so a new caption length can
 reuse the compiled graphs. Main joint attention keeps its static buckets and
 original FA4 path. Both the text mask and attention need symbolic lengths;
 marking only Q/K/V dynamic leaves static `BlockMask.seq_lengths` constraints.
+
+`utils/gpu_metrics.py` samples hardware SM, tensor-core and memory activity in a
+background thread. `Tracker.training` records averages across every GPU in
+BytedWandB and the local metrics file, alongside valid/total device counts.
+These are recent two-second NVML GPM intervals, not the platform's rolling SMA
+window or the GPU-busy percentage. Unavailable, failed or stale samples leave
+activity values absent; driver timeouts do not block or fail training.
 
 Training, overfit and inference seed Python, NumPy and Torch and enable
 deterministic library algorithms before model execution. This also fixes

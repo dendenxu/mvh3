@@ -23,7 +23,9 @@ export PATH="$(dirname "$mvh3_python"):$PATH"
 [[ "${ARNOLD_WORKER_NUM:-}" == 8 && "${ARNOLD_WORKER_GPU:-}" == 8 ]]
 [[ "${ARNOLD_ID:-}" =~ ^[0-7]$ ]]
 
-export WORLDGEN_TORCH_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+# Keep main/autograd threads fixed for the whole process. Four CPU threads
+# accelerate offloaded AdamW and EMA without per-step compile guard changes.
+export WORLDGEN_TORCH_NUM_THREADS=4 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1
 export PYTHONUNBUFFERED=1 TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
 unset GIT_DIR GIT_WORK_TREE http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 mvh3_run="${MVH3_RUN_DIR:-local/production64_${ARNOLD_MONITOR_TRIAL_ID}}"

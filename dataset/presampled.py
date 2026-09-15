@@ -334,17 +334,18 @@ class PresampledDataset(Dataset):
         self.pose_cache = {}
         if len(self.shard_idx):
             pf = pq.ParquetFile(self.spec)
-            want = set(int(i) for i in self.shard_idx)
+            rows = np.sort(self.shard_idx)
             md = pf.metadata
             off = 0
             for rg in range(md.num_row_groups):
                 n = md.row_group(rg).num_rows
-                if any(off <= i < off + n for i in want):
+                start, stop = np.searchsorted(rows, (off, off + n))
+                if start != stop:
                     col = pf.read_row_group(rg, columns=["pose"]).column("pose")
-                    for i in range(n):
-                        gi = off + i
-                        if gi in want:
-                            self.pose_cache[gi] = np.asarray(col[i].as_py(), dtype=np.float32)
+                    for gi in rows[start:stop]:
+                        # Keep a writable float32 copy without boxing every
+                        # camera scalar through Arrow's Python-list conversion.
+                        self.pose_cache[int(gi)] = np.array(col[int(gi) - off].values, dtype=np.float32)
                 off += n
         self.video_readers = {}
         self.inited = True

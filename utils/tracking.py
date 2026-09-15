@@ -14,6 +14,7 @@ from omegaconf import OmegaConf
 
 from utils.config import recipe_digest
 from utils import distributed as groups
+from utils.gpu_metrics import GpuMetrics
 
 
 class Tracker:
@@ -128,6 +129,11 @@ class Tracker:
             dist.broadcast_object_list(error, src=0)
         if error[0]:
             raise RuntimeError(error[0])
+        self.gpu_metrics = (
+            GpuMetrics(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
+            if torch.cuda.is_available()
+            else None
+        )
 
     def log(self, values, step):
         if self.run:
@@ -163,6 +169,23 @@ class Tracker:
             self.peak_allocated = max(self.peak_allocated, int(peak))
             row["vram"] = torch.cuda.max_memory_allocated() // 1024**2
             row["mem_now"] = torch.cuda.memory_allocated() // 1024**2
+
+            # Every rank contributes its own GPU, including ranks outside the
+            # logging node. Publish averages only with full, fresh coverage.
+            activity, status = self.gpu_metrics.snapshot()
+            metrics = torch.tensor(
+                [int(bool(activity)), *(activity.get(name, 0.0) for name in GpuMetrics.metrics.values())],
+                device=device,
+                dtype=torch.float64,
+            )
+            if dist.is_initialized():
+                dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+            count, *totals = metrics.tolist()
+            row["gpu_metrics_valid_devices"] = int(count)
+            row["gpu_metrics_total_devices"] = groups.get_world_size()
+            row["gpu_metrics_local_status"] = status
+            if count == groups.get_world_size():
+                row.update({name: total / count for name, total in zip(GpuMetrics.metrics.values(), totals)})
         batch_size = len(document["views"]) if document["isolated"] else 1
         row.update(
             gnorm=row["grad_norm"],
@@ -242,5 +265,7 @@ class Tracker:
             self.log(values, step)
 
     def finish(self, success=True):
+        if self.gpu_metrics is not None:
+            self.gpu_metrics.close()
         if self.run:
             self.run.finish(exit_code=0 if success else 1)
