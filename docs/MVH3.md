@@ -148,6 +148,12 @@ reconstruct the flat gradient during backward.
 The CUDA allocator also retains buffers across source samples. Caption length
 changes do not flush it; explicit warmup and interval settings control cleanup.
 
+The text refiner keeps actual caption lengths. Its sparse mask reduction and
+Triton flex attention compile with dynamic shapes, so a new caption length can
+reuse the compiled graphs. Main joint attention keeps its static buckets and
+original FA4 path. Both the text mask and attention need symbolic lengths;
+marking only Q/K/V dynamic leaves static `BlockMask.seq_lengths` constraints.
+
 Training, overfit and inference seed Python, NumPy and Torch and enable
 deterministic library algorithms before model execution. This also fixes
 Inductor reduction selection and repeated-KV gradient accumulation. cuBLAS

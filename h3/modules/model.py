@@ -22,7 +22,7 @@ from torch.nn.attention.flex_attention import BlockMask
 from utils.config import model_config
 from h3.compile_shapes import pad_camera
 from h3.modules.masking import TokenLayout
-from h3.modules.attention import dispatch_attention_fn, compiled_flex_attention
+from h3.modules.attention import dispatch_attention_fn, dynamic_flex_attention, compiled_flex_attention
 from h3.modules.layers import (
     Timesteps,
     FeedForward,
@@ -181,6 +181,7 @@ class MiniMaxH3AttnProcessor:
     sequence_parallel = False
     camera_mode = "decomposed"
     fa4 = False
+    dynamic_shapes = False
 
     def __call__(
         self,
@@ -258,7 +259,8 @@ class MiniMaxH3AttnProcessor:
             key, value, attention_mask = kv_cache.read_and_append(key, value, cache_layout, update_cache)
 
         if isinstance(attention_mask, BlockMask):
-            hidden_states = compiled_flex_attention(
+            attention_fn = dynamic_flex_attention if self.dynamic_shapes else compiled_flex_attention
+            hidden_states = attention_fn(
                 query.transpose(1, 2),
                 key.transpose(1, 2),
                 value.transpose(1, 2),
@@ -369,6 +371,10 @@ class MiniMaxH3TokenRefinerBlock(nn.Module):
             dim_head=attention_head_dim,
             qk_norm_eps=qk_norm_eps,
         )
+
+        # Caption lengths vary independently of the main sequence buckets.
+        # Only the text refiner uses symbolic sparse-attention shapes.
+        self.attn.processor.dynamic_shapes = True
         self.norm2 = nn.RMSNorm(hidden_size, eps=norm_eps)
         self.ff = FeedForward(hidden_size, inner_dim=ffn_dim, activation_fn="swiglu", bias=False)
 

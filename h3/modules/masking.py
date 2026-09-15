@@ -20,7 +20,8 @@ def block_counts(mask_mod, query_length, key_length, device, block_size=128):
     return mask.view(1, 1, q_blocks, q_size, k_blocks, k_size).sum(dim=(3, 5))
 
 
-_compiled_block_counts = torch.compile(block_counts, dynamic=False, fullgraph=True)
+compiled_block_counts = torch.compile(block_counts, dynamic=False, fullgraph=True)
+dynamic_block_counts = torch.compile(block_counts, dynamic=True, fullgraph=True)
 
 
 def ordered_blocks(visible):
@@ -31,7 +32,7 @@ def ordered_blocks(visible):
 
 
 @torch.compiler.disable(recursive=False)
-def build_block_mask(mask_mod, query_length, key_length, device, block_size=128):
+def build_block_mask(mask_mod, query_length, key_length, device, block_size=128, *, dynamic_shapes=False):
     """Compile visibility reduction without fusing the small block-grid sorts."""
     from torch.nn.attention.flex_attention import BlockMask
 
@@ -39,8 +40,12 @@ def build_block_mask(mask_mod, query_length, key_length, device, block_size=128)
     if len(block_size) != 2 or any(not isinstance(value, int) or value <= 0 for value in block_size):
         raise ValueError("Block size must contain two positive integer dimensions")
     device = torch.device(device)
-    counts_fn = _compiled_block_counts if device.type == "cuda" else block_counts
+    counts_fn = block_counts
+    if device.type == "cuda":
+        counts_fn = dynamic_block_counts if dynamic_shapes else compiled_block_counts
     counts = counts_fn(mask_mod, query_length, key_length, device, block_size)
+
+    # Fusing the block-grid sorts into the reduction creates oversized ptxas kernels.
     block_area = block_size[0] * block_size[1]
     partial = ordered_blocks((counts > 0) & (counts < block_area))
     full = ordered_blocks(counts == block_area)
@@ -185,6 +190,8 @@ class TokenLayout:
                 q, k = indices[query.clamp_max(size - 1)], indices[key.clamp_max(size - 1)]
                 return valid & self.mask_mod(batch, head, q, k)
 
-        # Keep sorting on the small block grid outside the compiled reduction.
-        # Fusing both sorts and their transpose scatters creates huge ptxas kernels.
-        return build_block_mask(mask_mod, size, size, self.kind.device, block_size)
+        # Text subsets keep their actual lengths even when the joint sequence is
+        # bucketed. Compile their mask reduction with symbolic lengths too.
+        return build_block_mask(
+            mask_mod, size, size, self.kind.device, block_size, dynamic_shapes=indices is not None
+        )

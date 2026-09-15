@@ -44,6 +44,7 @@ def sparse_attention(query, key, value, block_mask, kernel_options=None):
 
 
 compiled_flex_attention = torch.compile(sparse_attention, dynamic=False, fullgraph=True)
+dynamic_flex_attention = torch.compile(sparse_attention, dynamic=True, fullgraph=True)
 
 
 def dispatch_attention_fn(

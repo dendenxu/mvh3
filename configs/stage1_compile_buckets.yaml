@@ -1,6 +1,6 @@
 parents: [stage1_diffusion_forcing.yaml]
-# Candidate for bounded verification before restoring the paused HR run.
-# Pad only unused rows; keep every original sample, caption and chunk.
+# Bucket unused joint-sequence rows; the text refiner uses dynamic lengths.
+# Keep every original sample, caption and chunk.
 h3:
   checkpoint_outside_compile: true
   training_shape_buckets:
